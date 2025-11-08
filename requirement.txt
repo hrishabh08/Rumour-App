@@ -1,0 +1,11 @@
+streamlit
+networkx
+pandas
+matplotlib
+scikit-learn
+tensorflow
+spektral
+torch
+torchvision
+torchaudio
+node2vec

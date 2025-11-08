@@ -1,0 +1,77 @@
+# -----------------------
+# Python
+# -----------------------
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.cache
+*.egg
+*.egg-info
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+
+# -----------------------
+# Virtual environment
+# -----------------------
+venv/
+ENV/
+env/
+.venv/
+
+# -----------------------
+# Streamlit
+# -----------------------
+.streamlit/secrets.toml
+.streamlit/*.log
+.streamlit/*.json
+
+# -----------------------
+# User Data (DO NOT UPLOAD login info)
+# -----------------------
+C:/RumourApp/auth/users.json
+*/RumourApp/auth/users.json
+RumourApp/auth/users.json
+auth/users.json
+
+# -----------------------
+# OS Files
+# -----------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -----------------------
+# Logs
+# -----------------------
+*.log
+logs/
+*.out
+*.err
+
+# -----------------------
+# Jupyter (if used)
+# -----------------------
+.ipynb_checkpoints/
+
+# -----------------------
+# Temp files
+# -----------------------
+*.tmp
+*.swp
+*.bak
+
+# -----------------------
+# Node2Vec Temporary Model Files
+# -----------------------
+*.emb
+*.vec
+
+# -----------------------
+# IDE Specific Files
+# -----------------------
+.vscode/
+.idea/
+*.iml
