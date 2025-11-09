@@ -1,11 +1,12 @@
 streamlit
 networkx
 pandas
+numpy
 matplotlib
 scikit-learn
-tensorflow
-spektral
+node2vec
+tensorflow-cpu==2.15
+spektral==1.3.0
 torch
 torchvision
 torchaudio
-node2vec
