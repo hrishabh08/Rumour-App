@@ -94,6 +94,18 @@ def authenticate_user(username: str, password: str) -> bool:
     return hash_password(password, rec["salt"]) == rec["pwd_hash"]
 
 
+def save_json(ds_id: str, filename: str, payload: dict):
+    path = DATA_DIR / ds_id / filename
+    path.write_text(json.dumps(payload, indent=2))
+
+
+def load_json(ds_id: str, filename: str) -> dict | None:
+    path = DATA_DIR / ds_id / filename
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
 # ------------------ DATASET STORAGE (filesystem-first) ------------------
 
 
@@ -195,6 +207,17 @@ import re
 
 def re_split(s: str) -> list[str]:
     return re.split(r"[\s,]+", s.strip())
+
+
+import traceback
+
+
+def show_exception(e: Exception, context: str = ""):
+    st.error(f"❌ Error occurred {f'in {context}' if context else ''}")
+    st.code(str(e), language="text")
+
+    with st.expander("🔍 Show full traceback"):
+        st.code(traceback.format_exc(), language="python")
 
 
 # ------------------ SIMULATION MODELS ------------------
@@ -663,507 +686,580 @@ menu = st.sidebar.selectbox(
 
 # --- Home ---
 if menu == "Home":
-    st.title("🕸️ Rumour Blocking Simulator")
-    st.markdown(
-        """
-    This app demonstrates rumour spread simulations on user-uploaded networks and allows testing blocking strategies.
+    try:
+        st.title("🕸️ Rumour Blocking Simulator")
+        st.markdown(
+            """
+        This app demonstrates rumour spread simulations on user-uploaded networks and allows testing blocking strategies.
 
-    Flow:
-    1. Register / Login
-    2. Create a dataset (name) and upload two files: edges and initial seeds
-    3. Visualize the network
-    4. Simulate spread and test containment strategies
-    5. Download reports
-    """
-    )
-    if st.session_state["user"]:
-        st.success(f"Logged in as: {st.session_state['user']}")
-    else:
-        st.info("Please register or login to create datasets.")
+        Flow:
+        1. Register / Login
+        2. Create a dataset (name) and upload two files: edges and initial seeds
+        3. Visualize the network
+        4. Simulate spread and test containment strategies
+        5. Download reports
+        """
+        )
+        if st.session_state["user"]:
+            st.success(f"Logged in as: {st.session_state['user']}")
+        else:
+            st.info("Please register or login to create datasets.")
+
+    except Exception as e:
+        show_exception(e, "Home Page")
 
 # --- Register ---
 
 elif menu == "Register":
-    st.title("Create an Account")
+    try:
+        st.title("Create an Account")
 
-    full_name = st.text_input("Full Name")
-    username = st.text_input("Username")
-    email = st.text_input("Email")
-    dob = st.date_input(
-        "Date of Birth",
-        min_value=date(1900, 1, 1),  # Allow dates as far back as 1900
-        max_value=date.today(),  # Prevent selecting future dates
-        key="dob_input",
-    )
-    password = st.text_input("Password", type="password")
-    confirm_password = st.text_input("Confirm Password", type="password")
+        full_name = st.text_input("Full Name")
+        username = st.text_input("Username")
+        email = st.text_input("Email")
+        dob = st.date_input(
+            "Date of Birth",
+            min_value=date(1900, 1, 1),  # Allow dates as far back as 1900
+            max_value=date.today(),  # Prevent selecting future dates
+            key="dob_input",
+        )
+        password = st.text_input("Password", type="password")
+        confirm_password = st.text_input("Confirm Password", type="password")
 
-    if st.button("Register", key="register_btn"):
-        users = load_users()
+        if st.button("Register", key="register_btn"):
+            users = load_users()
 
-        # -------- VALIDATIONS -------- #
+            # -------- VALIDATIONS -------- #
 
-        # Full name
-        if len(full_name.strip()) < 3:
-            st.error("Full Name must be at least 3 characters.")
-            st.stop()
+            # Full name
+            if len(full_name.strip()) < 3:
+                st.error("Full Name must be at least 3 characters.")
+                st.stop()
 
-        # Username
-        if len(username.strip()) < 3:
-            st.error("Username must be at least 3 characters.")
-            st.stop()
+            # Username
+            if len(username.strip()) < 3:
+                st.error("Username must be at least 3 characters.")
+                st.stop()
 
-        if username in users:
-            st.error("Username already exists. Choose a different one.")
-            st.stop()
+            if username in users:
+                st.error("Username already exists. Choose a different one.")
+                st.stop()
 
-        # Email
-        import re
+            # Email
+            import re
 
-        email_pattern = r"^[\w\.-]+@[\w\.-]+\.\w+$"
-        if not re.match(email_pattern, email):
-            st.error("Invalid email format.")
-            st.stop()
+            email_pattern = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+            if not re.match(email_pattern, email):
+                st.error("Invalid email format.")
+                st.stop()
 
-        # DOB validation (age ≥ 13)
-        from datetime import date
+            # DOB validation (age ≥ 13)
+            from datetime import date
 
-        today = date.today()
-        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+            today = date.today()
+            age = (
+                today.year
+                - dob.year
+                - ((today.month, today.day) < (dob.month, dob.day))
+            )
 
-        if age < 13:
-            st.error("You must be at least 13 years old to register.")
-            st.stop()
+            if age < 13:
+                st.error("You must be at least 13 years old to register.")
+                st.stop()
 
-        # Password
-        if len(password) < 6:
-            st.error("Password must be at least 6 characters.")
-            st.stop()
+            # Password
+            if len(password) < 6:
+                st.error("Password must be at least 6 characters.")
+                st.stop()
 
-        if password != confirm_password:
-            st.error("Passwords do not match.")
-            st.stop()
+            if password != confirm_password:
+                st.error("Passwords do not match.")
+                st.stop()
 
-        # -------- SAVE USER -------- #
-        salt = secrets.token_hex(16)
-        pwd_hash = hash_password(password, salt)
+            # -------- SAVE USER -------- #
+            salt = secrets.token_hex(16)
+            pwd_hash = hash_password(password, salt)
 
-        users[username] = {
-            "full_name": full_name,
-            "email": email,
-            "dob": str(dob),
-            "salt": salt,
-            "pwd_hash": pwd_hash,
-            "created_at": datetime.utcnow().isoformat(),
-        }
+            users[username] = {
+                "full_name": full_name,
+                "email": email,
+                "dob": str(dob),
+                "salt": salt,
+                "pwd_hash": pwd_hash,
+                "created_at": datetime.utcnow().isoformat(),
+            }
 
-        save_users(users)
+            save_users(users)
 
-        st.success("✅ Registration successful! You can now log in.")
-        st.info(f"Welcome, {full_name}!")
+            st.success("✅ Registration successful! You can now log in.")
+            st.info(f"Welcome, {full_name}!")
+
+    except Exception as e:
+        show_exception(e, "Register Page")
+
 
 # --- Login ---
 elif menu == "Login":
-    st.title("Login")
-    u = st.text_input("Username", key="login_user")
-    p = st.text_input("Password", type="password", key="login_pass")
-    if st.button("Login"):
-        if authenticate_user(u, p):
-            st.session_state["user"] = u
-            st.success("Logged in")
-        else:
-            st.error("Invalid credentials")
+    try:
+        st.title("Login")
+        u = st.text_input("Username", key="login_user")
+        p = st.text_input("Password", type="password", key="login_pass")
+        if st.button("Login"):
+            if authenticate_user(u, p):
+                st.session_state["user"] = u
+                st.success("Logged in")
+            else:
+                st.error("Invalid credentials")
+
+    except Exception as e:
+        show_exception(e, "Login Page")
 
 # --- Create Dataset ---
 elif menu == "Create Dataset":
-    st.title("Create a new dataset")
-    if not st.session_state["user"]:
-        st.warning("You must be logged in to create datasets.")
-    else:
-        name = st.text_input("Dataset name")
-        if st.button("Create"):
-            if not name.strip():
-                st.error("Name required")
-            else:
-                meta = create_dataset(name.strip(), st.session_state["user"])
-                st.success(f"Dataset created: {meta['id']}")
+    try:
+        st.title("Create a new dataset")
+        if not st.session_state["user"]:
+            st.warning("You must be logged in to create datasets.")
+        else:
+            name = st.text_input("Dataset name")
+            if st.button("Create"):
+                if not name.strip():
+                    st.error("Name required")
+                else:
+                    meta = create_dataset(name.strip(), st.session_state["user"])
+                    st.success(f"Dataset created: {meta['id']}")
+    except Exception as e:
+        show_exception(e, "Dataset Page")
 
 # --- Datasets (upload files) ---
 elif menu == "Datasets":
-    st.title("Datasets")
-    if not st.session_state["user"]:
-        st.warning("Login first")
-    else:
-        df = list_datasets(owner=st.session_state["user"])
-        st.dataframe(df)
-        if df.empty:
-            st.info("No datasets yet. Create one first.")
+    try:
+        st.title("Datasets")
+        if not st.session_state["user"]:
+            st.warning("Login first")
         else:
-            selected = st.selectbox("Select dataset", df["name"] + " — " + df["id"])
-            ds_id = selected.split(" — ")[-1]
-            st.write("Dataset ID:", ds_id)
-            st.subheader("Upload edge list (file with two columns, no header)")
-            edges_file = st.file_uploader(
-                "Edge file", type=["csv", "txt"], key=f"edges_{ds_id}"
-            )
-            st.subheader("Upload seed list (one node per line)")
-            seeds_file = st.file_uploader(
-                "Seed file", type=["csv", "txt"], key=f"seeds_{ds_id}"
-            )
-            if edges_file and st.button("Save edges", key=f"save_edges_{ds_id}"):
-                cnt = save_edges_csv(ds_id, edges_file)
-                st.success(f"Saved {cnt} edges")
-            if seeds_file and st.button("Save seeds", key=f"save_seeds_{ds_id}"):
-                cnt = save_seeds_csv(ds_id, seeds_file)
-                st.success(f"Saved {cnt} seed rows")
+            df = list_datasets(owner=st.session_state["user"])
+            st.dataframe(df)
+            if df.empty:
+                st.info("No datasets yet. Create one first.")
+            else:
+                selected = st.selectbox("Select dataset", df["name"] + " — " + df["id"])
+                ds_id = selected.split(" — ")[-1]
+                st.write("Dataset ID:", ds_id)
+                st.subheader("Upload edge list (file with two columns, no header)")
+                edges_file = st.file_uploader(
+                    "Edge file", type=["csv", "txt"], key=f"edges_{ds_id}"
+                )
+                st.subheader("Upload seed list (one node per line)")
+                seeds_file = st.file_uploader(
+                    "Seed file", type=["csv", "txt"], key=f"seeds_{ds_id}"
+                )
+                if edges_file and st.button("Save edges", key=f"save_edges_{ds_id}"):
+                    cnt = save_edges_csv(ds_id, edges_file)
+                    st.success(f"Saved {cnt} edges")
+                if seeds_file and st.button("Save seeds", key=f"save_seeds_{ds_id}"):
+                    cnt = save_seeds_csv(ds_id, seeds_file)
+                    st.success(f"Saved {cnt} seed rows")
+
+    except Exception as e:
+        show_exception(e, "Datasets Page")
 
 # --- Visualization ---
 elif menu == "Visualization":
-    st.title("Network Visualization")
-    if not st.session_state["user"]:
-        st.warning("Login first")
-    else:
-        df = list_datasets(owner=st.session_state["user"])
-        if df.empty:
-            st.info("No datasets yet")
+    try:
+        st.title("Network Visualization")
+        if not st.session_state["user"]:
+            st.warning("Login first")
         else:
-            selected = st.selectbox("Select dataset", df["name"] + " — " + df["id"])
-            ds_id = selected.split(" — ")[-1]
-            edges = read_edges(ds_id)
-            seeds = read_seeds(ds_id)
-            if not edges:
-                st.warning("No edges uploaded for this dataset")
+            df = list_datasets(owner=st.session_state["user"])
+            if df.empty:
+                st.info("No datasets yet")
             else:
-                st.info("Building Graph1")
-                G = build_graph(edges)
-                blocked = []
-                plt_obj = plot_graph_new(
-                    G, affected=seeds, title="Visualization of Network"
-                )
-                st.info("Building Graph Successful")
-                st.write(
-                    f"Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}, Seeds: {len(seeds)}"
-                )
+                selected = st.selectbox("Select dataset", df["name"] + " — " + df["id"])
+                ds_id = selected.split(" — ")[-1]
+                edges = read_edges(ds_id)
+                seeds = read_seeds(ds_id)
+                if not edges:
+                    st.warning("No edges uploaded for this dataset")
+                else:
+                    st.info("Building Graph...")
+                    G = build_graph(edges)
+                    blocked = []
+                    plt_obj = plot_graph_new(
+                        G, affected=seeds, title="Visualization of Network"
+                    )
+                    st.info("Building Graph Successful")
+                    st.write(
+                        f"Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}, Seeds: {len(seeds)}"
+                    )
+                if st.button("💾 Save Visualization", key=f"save_vis_{ds_id}"):
+                    payload = {
+                        "dataset_id": ds_id,
+                        "saved_at": datetime.utcnow().isoformat(),
+                        "nodes": G.number_of_nodes(),
+                        "edges": G.number_of_edges(),
+                        "seeds": seeds,
+                    }
+                    save_json(ds_id, "visualization.json", payload)
+                    st.success("Visualization saved successfully")
+    except Exception as e:
+        show_exception(e, "Visualization Page")
 
 # --- Simulation ---
 elif menu == "Simulation":
-    st.title("Simulate Rumor Spread")
+    try:
+        st.title("Simulate Rumor Spread")
 
-    if not st.session_state["user"]:
-        st.warning("⚠️ Please login first.")
-        st.stop()
+        if not st.session_state["user"]:
+            st.warning("⚠️ Please login first.")
+            st.stop()
 
-    df = list_datasets(owner=st.session_state["user"])
-    if df.empty:
-        st.info("No datasets yet.")
-        st.stop()
+        df = list_datasets(owner=st.session_state["user"])
+        if df.empty:
+            st.info("No datasets yet.")
+            st.stop()
 
-    # Dataset selector
-    selected = st.selectbox(
-        "Select dataset", df["name"] + " — " + df["id"], key="select_dataset_simulation"
-    )
-    ds_id = selected.split(" — ")[-1]
+        # Dataset selector
+        selected = st.selectbox(
+            "Select dataset",
+            df["name"] + " — " + df["id"],
+            key="select_dataset_simulation",
+        )
+        ds_id = selected.split(" — ")[-1]
 
-    edges = read_edges(ds_id)
-    seeds = read_seeds(ds_id)
+        edges = read_edges(ds_id)
+        seeds = read_seeds(ds_id)
 
-    if not edges:
-        st.warning("⚠️ No edges uploaded for this dataset.")
-        st.stop()
+        if not edges:
+            st.warning("⚠️ No edges uploaded for this dataset.")
+            st.stop()
 
-    G = build_graph(edges)
-    nodes = list(G.nodes())
+        G = build_graph(edges)
+        nodes = list(G.nodes())
 
-    st.subheader("Simulation Settings")
+        st.subheader("Simulation Settings")
 
-    # SLIDERS
-    runs_mc = st.slider("Monte Carlo runs for label generation", 50, 1000, 200)
-    p_sim = st.slider("Infection probability", 0.01, 1.0, 0.1)
-    emb_dim = st.selectbox("Node2Vec embedding dim", [16, 32, 64, 128], index=2)
-    rf_split = st.slider("Train/Test Split (%)", 10, 50, 20)
+        # SLIDERS
+        runs_mc = st.slider("Monte Carlo runs for label generation", 50, 1000, 200)
+        p_sim = st.slider("Infection probability", 0.01, 1.0, 0.1)
+        emb_dim = st.selectbox("Node2Vec embedding dim", [16, 32, 64, 128], index=2)
+        rf_split = st.slider("Train/Test Split (%)", 10, 50, 20)
 
-    method = st.selectbox(
-        "Select simulation method",
-        ["Node2Vec + Random Forest", "Graph Neural Network (GNN)"],
-        key="simulation_method",
-    )
+        method = st.selectbox(
+            "Select simulation method",
+            ["Node2Vec + Random Forest", "Graph Neural Network (GNN)"],
+            key="simulation_method",
+        )
 
-    if st.button("Run Simulation", key="run_sim_btn"):
+        if st.button("Run Simulation", key="run_sim_btn"):
 
-        # ==========================================================
-        # ✅ STEP 1 — Generate Labels (Monte Carlo IC Spread)
-        # ==========================================================
-        with st.spinner("Generating labels using Monte Carlo IC..."):
-            freq, _ = generate_ic_labels(G, seeds, p=p_sim, runs=runs_mc)
+            # ==========================================================
+            # ✅ STEP 1 — Generate Labels (Monte Carlo IC Spread)
+            # ==========================================================
+            with st.spinner("Generating labels using Monte Carlo IC..."):
+                freq, _ = generate_ic_labels(G, seeds, p=p_sim, runs=runs_mc)
 
-        y_freq = np.array([freq[n] for n in nodes])
-        y_binary = (y_freq > 0).astype(int)
+            y_freq = np.array([freq[n] for n in nodes])
+            y_binary = (y_freq > 0).astype(int)
 
-        st.write("### 📊 Label Statistics")
-        st.dataframe(pd.Series(y_freq).describe())
+            st.write("### 📊 Label Statistics")
+            st.dataframe(pd.Series(y_freq).describe())
 
-        # ==========================================================
-        # ✅ STEP 2 — MODEL TRAINING (NODE2VEC or GNN)
-        # ==========================================================
-        if method == "Node2Vec + Random Forest":
-            st.subheader("Training Node2Vec + Random Forest Model")
+            # ==========================================================
+            # ✅ STEP 2 — MODEL TRAINING (NODE2VEC or GNN)
+            # ==========================================================
+            if method == "Node2Vec + Random Forest":
+                st.subheader("Training Node2Vec + Random Forest Model")
 
-            # Compute node2vec embeddings
-            X = compute_node_features(G, node2vec_dim=emb_dim)
-            X = X.reindex(nodes).fillna(0.0)
+                # Compute node2vec embeddings
+                X = compute_node_features(G, node2vec_dim=emb_dim)
+                X = X.reindex(nodes).fillna(0.0)
 
-            clf, test_data, metrics = train_predict_model(
-                X.values, y_binary, test_size=rf_split / 100.0
+                clf, test_data, metrics = train_predict_model(
+                    X.values, y_binary, test_size=rf_split / 100.0
+                )
+
+                # Show Metrics
+                auc_val = metrics.get("auc")
+                pr_auc = metrics.get("pr_auc")
+                st.metric("AUC (test)", f"{auc_val:.4f}" if auc_val else "N/A")
+                st.metric("PR AUC (test)", f"{pr_auc:.4f}" if pr_auc else "N/A")
+
+                probs_all = clf.predict_proba(X.values)[:, 1]
+                prob_dict = {n: probs_all[i] for i, n in enumerate(nodes)}
+
+            else:
+                st.subheader("Training Graph Neural Network (GNN) Model")
+
+                # 🔥 GNN training returns dict: node → risk probability
+                prob_dict = train_gnn(G, y_binary, epochs=50)
+
+            # ==========================================================
+            # ✅ STEP 3 — VISUALIZE HIGH RISK NODES (PREDICTION ONLY)
+            # ==========================================================
+            st.write("### 🔥 High-Risk Nodes (Prediction Only)")
+            high_risk = sorted(prob_dict, key=prob_dict.get, reverse=True)[:20]
+
+            plot_graph_new(
+                G,
+                affected=high_risk,
+                title="High-Risk Nodes (Prediction, NOT Infection)",
             )
 
-            # Show Metrics
-            auc_val = metrics.get("auc")
-            pr_auc = metrics.get("pr_auc")
-            st.metric("AUC (test)", f"{auc_val:.4f}" if auc_val else "N/A")
-            st.metric("PR AUC (test)", f"{pr_auc:.4f}" if pr_auc else "N/A")
+            # ==========================================================
+            # ✅ STEP 4 — RUN PREDICTED FLOW SIMULATION (Actual Infection)
+            # ==========================================================
+            st.write("### ✅ Actual Spread Simulation (Using Predicted Susceptibility)")
 
-            probs_all = clf.predict_proba(X.values)[:, 1]
-            prob_dict = {n: probs_all[i] for i, n in enumerate(nodes)}
+            mc_runs = st.number_input(
+                "Monte Carlo runs for predicted-flow",
+                min_value=10,
+                max_value=300,
+                value=50,
+            )
 
-        else:
-            st.subheader("Training Graph Neural Network (GNN) Model")
+            infected_final = set()
+            infected_list = []
 
-            # 🔥 GNN training returns dict: node → risk probability
-            prob_dict = train_gnn(G, y_binary, epochs=50)
+            for _ in range(mc_runs):
+                infected = simulate_ic_predicted(G, seeds, prob_dict, base_p=p_sim)
+                infected_list.append(len(infected))
+                infected_final |= infected
 
-        # ==========================================================
-        # ✅ STEP 3 — VISUALIZE HIGH RISK NODES (PREDICTION ONLY)
-        # ==========================================================
-        st.write("### 🔥 High-Risk Nodes (Prediction Only)")
-        high_risk = sorted(prob_dict, key=prob_dict.get, reverse=True)[:20]
+            st.write("### 📊 Infection Distribution Summary")
+            st.dataframe(pd.Series(infected_list).describe())
 
-        plot_graph_new(
-            G, affected=high_risk, title="High-Risk Nodes (Prediction, NOT Infection)"
-        )
+            # Visualization of final spread
+            plot_graph_new(
+                G, affected=infected_final, title="Final Infected Nodes (Actual Spread)"
+            )
+            st.session_state["sim_data"] = {
+                "method": method,
+                "infection_probability": p_sim,
+                "mc_runs": mc_runs,
+                "high_risk_nodes": high_risk,
+                "infected_final_count": len(infected_final),
+                "infection_distribution": infected_list,
+            }
 
-        # ==========================================================
-        # ✅ STEP 4 — RUN PREDICTED FLOW SIMULATION (Actual Infection)
-        # ==========================================================
-        st.write("### ✅ Actual Spread Simulation (Using Predicted Susceptibility)")
+            # ==========================================================
+            # ✅ STEP 5 — DOWNLOAD RESULTS
+            # ==========================================================
+            buf = io.StringIO()
+            pd.Series(infected_list).to_csv(buf, index=False)
 
-        mc_runs = st.number_input(
-            "Monte Carlo runs for predicted-flow", min_value=10, max_value=300, value=50
-        )
+            st.download_button(
+                "⬇️ Download infection distribution CSV",
+                buf.getvalue(),
+                file_name=f"predicted_flow_{ds_id}.csv",
+                mime="text/csv",
+            )
 
-        infected_final = set()
-        infected_list = []
+        if st.button("💾 Save Simulation Results", key=f"save_sim_{ds_id}"):
 
-        for _ in range(mc_runs):
-            infected = simulate_ic_predicted(G, seeds, prob_dict, base_p=p_sim)
-            infected_list.append(len(infected))
-            infected_final |= infected
+            if "sim_data" not in st.session_state:
+                st.error("❌ Run simulation first.")
+                st.stop()
 
-        st.write("### 📊 Infection Distribution Summary")
-        st.dataframe(pd.Series(infected_list).describe())
-
-        # Visualization of final spread
-        plot_graph_new(
-            G, affected=infected_final, title="Final Infected Nodes (Actual Spread)"
-        )
-
-        # ==========================================================
-        # ✅ STEP 5 — DOWNLOAD RESULTS
-        # ==========================================================
-        buf = io.StringIO()
-        pd.Series(infected_list).to_csv(buf, index=False)
-
-        st.download_button(
-            "⬇️ Download infection distribution CSV",
-            buf.getvalue(),
-            file_name=f"predicted_flow_{ds_id}.csv",
-            mime="text/csv",
-        )
+            payload = {
+                "dataset_id": ds_id,
+                "saved_at": datetime.utcnow().isoformat(),
+                **st.session_state["sim_data"],
+            }
+            st.success("Going to save Simulation results saved")
+            save_json(ds_id, "simulation.json", payload)
+            st.success("Simulation results saved")
+    except Exception as e:
+        show_exception(e, "Simulation Page")
 
 
 # --- Containment ---
 elif menu == "Containment":
-    st.title("Rumor Containment Strategies")
+    try:
+        st.title("Rumor Containment Strategies")
 
-    if not st.session_state["user"]:
-        st.warning("⚠️ Please login first.")
-        st.stop()
+        if not st.session_state["user"]:
+            st.warning("⚠️ Please login first.")
+            st.stop()
 
-    df = list_datasets(owner=st.session_state["user"])
-    if df.empty:
-        st.info("No datasets yet.")
-        st.stop()
+        df = list_datasets(owner=st.session_state["user"])
+        if df.empty:
+            st.info("No datasets yet.")
+            st.stop()
 
-    # Select dataset
-    selected = st.selectbox(
-        "Select dataset",
-        df["name"] + " — " + df["id"],
-        key="select_dataset_containment",
-    )
-    ds_id = selected.split(" — ")[-1]
+        # Select dataset
+        selected = st.selectbox(
+            "Select dataset",
+            df["name"] + " — " + df["id"],
+            key="select_dataset_containment",
+        )
+        ds_id = selected.split(" — ")[-1]
 
-    edges = read_edges(ds_id)
-    seeds = read_seeds(ds_id)
-    if not edges:
-        st.warning("⚠️ No edges uploaded for this dataset.")
-        st.stop()
+        edges = read_edges(ds_id)
+        seeds = read_seeds(ds_id)
+        if not edges:
+            st.warning("⚠️ No edges uploaded for this dataset.")
+            st.stop()
 
-    G = build_graph(edges)
+        G = build_graph(edges)
 
-    st.subheader("Containment Strategy Settings")
+        st.subheader("Containment Strategy Settings")
 
-    p_sim = st.slider("Infection probability", 0.01, 1.0, 0.1)
-    runs_containment = st.slider("Monte Carlo runs", 50, 500, 200)
-    k_block = st.number_input(
-        "Number of nodes to BLOCK", min_value=1, max_value=50, value=5
-    )
-
-    containment_method = st.selectbox(
-        "Select containment strategy",
-        ["Degree Centrality", "Betweenness Centrality", "PageRank"],
-        key="containment_method",
-    )
-
-    if st.button("Run Containment Simulation", key="containment_run_btn"):
-        # ---- Baseline spread (no blocking) ------------------------------------
-        with st.spinner("Running baseline (no containment)..."):
-            infected_baseline = set()
-            for _ in range(runs_containment):
-                infected = simulate_ic_spread(G, seeds, p_sim)
-                infected_baseline |= infected
-
-        st.write("### ✅ Baseline Spread (No Containment)")
-        plot_graph_new(
-            G, affected=infected_baseline, title="Baseline Spread (No Blocking)"
+        p_sim = st.slider("Infection probability", 0.01, 1.0, 0.1)
+        runs_containment = st.slider("Monte Carlo runs", 50, 500, 200)
+        k_block = st.number_input(
+            "Number of nodes to BLOCK", min_value=1, max_value=50, value=5
         )
 
-        # ---- Determine nodes to block ----------------------------------------
-        st.subheader("Blocked Nodes Based on Centrality")
-
-        if containment_method == "Degree Centrality":
-            centrality = nx.degree_centrality(G)
-        elif containment_method == "Betweenness Centrality":
-            centrality = nx.betweenness_centrality(G)
-        else:
-            centrality = nx.pagerank(G)
-
-        # Pick top-k
-        blocked_nodes = sorted(centrality, key=centrality.get, reverse=True)[:k_block]
-
-        st.success(f"Blocked Nodes ({containment_method}): {blocked_nodes}")
-
-        # ---- Contained Spread (after blocking) --------------------------------
-        with st.spinner("Running spread with containment..."):
-            infected_contained = set()
-            for _ in range(runs_containment):
-                infected = simulate_ic_spread(G, seeds, p_sim, blocked=blocked_nodes)
-                infected_contained |= infected
-
-        st.write("### ✅ Spread After Containment")
-        plot_graph_new(
-            G, affected=infected_contained, title="Spread After Blocking Key Nodes"
+        containment_method = st.selectbox(
+            "Select containment strategy",
+            ["Degree Centrality", "Betweenness Centrality", "PageRank"],
+            key="containment_method",
         )
 
-        # ---- Comparison -------------------------------------------------------
-        st.subheader("📊 Containment Effectiveness")
+        if st.button("Run Containment Simulation", key="containment_run_btn"):
+            # ---- Baseline spread (no blocking) ------------------------------------
+            with st.spinner("Running baseline (no containment)..."):
+                infected_baseline = set()
+                for _ in range(runs_containment):
+                    infected = simulate_ic_spread(G, seeds, p_sim)
+                    infected_baseline |= infected
 
-        baseline_count = len(infected_baseline)
-        contained_count = len(infected_contained)
-        reduction = baseline_count - contained_count
-        reduction_pct = (reduction / baseline_count) * 100 if baseline_count > 0 else 0
+            st.write("### ✅ Baseline Spread (No Containment)")
+            plot_graph_new(
+                G, affected=infected_baseline, title="Baseline Spread (No Blocking)"
+            )
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Baseline Infected", baseline_count)
-        col2.metric("After Containment", contained_count)
-        col3.metric("Reduction (%)", f"{reduction_pct:.2f}%")
+            # ---- Determine nodes to block ----------------------------------------
+            st.subheader("Blocked Nodes Based on Centrality")
 
-        st.write("### ✅ Visual Comparison")
+            if containment_method == "Degree Centrality":
+                centrality = nx.degree_centrality(G)
+            elif containment_method == "Betweenness Centrality":
+                centrality = nx.betweenness_centrality(G)
+            else:
+                centrality = nx.pagerank(G)
 
-        compare_fig = plt.figure(figsize=(4, 2))
-        st.bar_chart({"Baseline": baseline_count, "After Containment": contained_count})
+            # Pick top-k
+            blocked_nodes = sorted(centrality, key=centrality.get, reverse=True)[
+                :k_block
+            ]
+
+            st.success(f"Blocked Nodes ({containment_method}): {blocked_nodes}")
+
+            # ---- Contained Spread (after blocking) --------------------------------
+            with st.spinner("Running spread with containment..."):
+                infected_contained = set()
+                for _ in range(runs_containment):
+                    infected = simulate_ic_spread(
+                        G, seeds, p_sim, blocked=blocked_nodes
+                    )
+                    infected_contained |= infected
+
+            st.write("### ✅ Spread After Containment")
+            plot_graph_new(
+                G, affected=infected_contained, title="Spread After Blocking Key Nodes"
+            )
+
+            # ---- Comparison -------------------------------------------------------
+            st.subheader("📊 Containment Effectiveness")
+
+            baseline_count = len(infected_baseline)
+            contained_count = len(infected_contained)
+            reduction = baseline_count - contained_count
+            reduction_pct = (
+                (reduction / baseline_count) * 100 if baseline_count > 0 else 0
+            )
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Baseline Infected", baseline_count)
+            col2.metric("After Containment", contained_count)
+            col3.metric("Reduction (%)", f"{reduction_pct:.2f}%")
+
+            st.write("### ✅ Visual Comparison")
+
+            compare_fig = plt.figure(figsize=(4, 2))
+            st.bar_chart(
+                {"Baseline": baseline_count, "After Containment": contained_count}
+            )
+
+            st.session_state["con_data"] = {
+                "method": containment_method,
+                "blocked_nodes": blocked_nodes,
+                "baseline_infected": baseline_count,
+                "contained_infected": contained_count,
+                "reduction_pct": reduction_pct,
+                "infection_probability": p_sim,
+                "runs": runs_containment,
+            }
+
+        if st.button("💾 Save Containment Results", key=f"save_cont_{ds_id}"):
+            if "con_data" not in st.session_state:
+                st.error("❌ Run Containment first.")
+                st.stop()
+
+            payload = {
+                "dataset_id": ds_id,
+                "saved_at": datetime.utcnow().isoformat(),
+                **st.session_state["con_data"],
+            }
+            st.success("Going to save Containment results saved")
+            save_json(ds_id, "containment.json", payload)
+
+    except Exception as e:
+        show_exception(e, "Containment Page")
 
 # --- Reports ---
 elif menu == "Reports":
-    st.title("Reports")
-    if not st.session_state["user"]:
-        st.warning("Login first")
-    else:
+    try:
+        st.title("📑 Dataset Reports")
+
+        if not st.session_state["user"]:
+            st.warning("Login first")
+            st.stop()
+
         df = list_datasets(owner=st.session_state["user"])
-        st.dataframe(df)
-        if not df.empty:
-            selected = st.selectbox("Select dataset", df["name"] + " — " + df["id"])
-            ds_id = selected.split(" — ")[-1]
-            edges = read_edges(ds_id)
-            seeds = read_seeds(ds_id)
-            if edges:
-                G = build_graph(edges)
-                # basic report
-                report = {
-                    "dataset_id": ds_id,
-                    "dataset_name": json.loads(
-                        (DATA_DIR / ds_id / "metadata.json").read_text()
-                    )["name"],
-                    "created_at": json.loads(
-                        (DATA_DIR / ds_id / "metadata.json").read_text()
-                    )["created_at"],
-                    "nodes": G.number_of_nodes(),
-                    "edges": G.number_of_edges(),
-                    "seeds": len(seeds),
-                }
-                st.json(report)
-                # offer downloads
-                buf = io.StringIO()
-                writer = csv.writer(buf)
-                writer.writerow(["metric", "value"])
-                for k, v in report.items():
-                    writer.writerow([k, v])
-                st.download_button(
-                    "Download report CSV",
-                    buf.getvalue(),
-                    file_name=f"report_{ds_id}.csv",
-                )
+        if df.empty:
+            st.info("No datasets available")
+            st.stop()
+
+        selected = st.selectbox("Select dataset", df["name"] + " — " + df["id"])
+        ds_id = selected.split(" — ")[-1]
+
+        meta = json.loads((DATA_DIR / ds_id / "metadata.json").read_text())
+        vis = load_json(ds_id, "visualization.json")
+        sim = load_json(ds_id, "simulation.json")
+        cont = load_json(ds_id, "containment.json")
+
+        report = {
+            "dataset": meta,
+            "visualization": vis,
+            "simulation": sim,
+            "containment": cont,
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+
+        st.subheader("📄 Report Preview")
+        st.json(report)
+
+        # Save report automatically
+        save_json(ds_id, "report.json", report)
+
+        # Download
+        buf = io.StringIO()
+        json.dump(report, buf, indent=2)
+
+        st.download_button(
+            "⬇️ Download Full Report (JSON)",
+            buf.getvalue(),
+            file_name=f"report_{ds_id}.json",
+            mime="application/json",
+        )
+    except Exception as e:
+        show_exception(e, "Reports Page")
 
 # End of file
 
 # Ensure session state is initialized
 if "page" not in st.session_state:
     st.session_state.page = "login"
-
-
-# # Simple navigation function
-# def go_to(page_name):
-#     st.session_state.page = page_name
-#     st.experimental_rerun()
-
-
-# # Page router
-# if st.session_state.page == "login":
-#     st.title("🔐 Login Page")
-#     username = st.text_input("Username")
-#     password = st.text_input("Password", type="password")
-#     if st.button("Login"):
-#         # (replace with your auth check)
-#         if username == "admin" and password == "admin":
-#             st.success("Login successful!")
-#             go_to("home")
-#         else:
-#             st.error("Invalid credentials")
-
-# elif st.session_state.page == "register":
-#     st.title("📝 Register Page")
-#     new_user = st.text_input("New Username")
-#     new_pass = st.text_input("Password", type="password")
-#     if st.button("Register"):
-#         st.success(f"User {new_user} registered! Now login.")
-#         go_to("login")
-
-# elif st.session_state.page == "home":
-#     st.title("🏠 Dashboard")
-#     st.write("Welcome to the Rumour Spread Simulation App!")
-#     if st.button("Create Dataset"):
-#         go_to("dataset")
-
-# elif st.session_state.page == "dataset":
-#     st.title("📂 Create Dataset")
-#     st.write("Upload edges and rumour node files here.")
-#     if st.button("Back"):
-#         go_to("home")
