@@ -687,6 +687,7 @@ if st.session_state.user:
 
     if st.sidebar.button("🚪 Logout"):
         st.session_state.clear()
+        st.rerun()
 else:
     st.sidebar.info("Not logged in")
 
@@ -831,7 +832,7 @@ elif menu == "Login":
             if authenticate_user(u, p):
                 st.session_state.user = u
                 st.success("✅ Logged in successfully")
-                st.experimental_rerun()  # 🔥 IMPORTANT
+                st.rerun()  # 🔥 IMPORTANT
             else:
                 st.error("❌ Invalid credentials")
 
