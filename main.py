@@ -99,6 +99,17 @@ def save_json(ds_id: str, filename: str, payload: dict):
     path.write_text(json.dumps(payload, indent=2))
 
 
+def get_centrality(G, method: str):
+    if method == "Degree Centrality":
+        return nx.degree_centrality(G)
+    elif method == "Betweenness Centrality":
+        return nx.betweenness_centrality(G)
+    elif method == "PageRank":
+        return nx.pagerank(G)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+
 def load_json(ds_id: str, filename: str) -> dict | None:
     path = DATA_DIR / ds_id / filename
     if not path.exists():
@@ -667,7 +678,18 @@ def precision_at_k(y_true, y_score, k):
 st.set_page_config(page_title="Rumour Blocking Simulator", layout="wide")
 
 if "user" not in st.session_state:
-    st.session_state["user"] = None
+    st.session_state.user = None
+
+st.sidebar.markdown("### 👤 Session")
+
+if st.session_state.user:
+    st.sidebar.success(f"Logged in as\n**{st.session_state.user}**")
+
+    if st.sidebar.button("🚪 Logout"):
+        st.session_state.clear()
+        st.experimental_rerun()
+else:
+    st.sidebar.info("Not logged in")
 
 menu = st.sidebar.selectbox(
     "Menu",
@@ -802,14 +824,17 @@ elif menu == "Register":
 elif menu == "Login":
     try:
         st.title("Login")
+
         u = st.text_input("Username", key="login_user")
         p = st.text_input("Password", type="password", key="login_pass")
+
         if st.button("Login"):
             if authenticate_user(u, p):
-                st.session_state["user"] = u
-                st.success("Logged in")
+                st.session_state.user = u
+                st.success("✅ Logged in successfully")
+                st.experimental_rerun()  # 🔥 IMPORTANT
             else:
-                st.error("Invalid credentials")
+                st.error("❌ Invalid credentials")
 
     except Exception as e:
         show_exception(e, "Login Page")
@@ -1111,87 +1136,89 @@ elif menu == "Containment":
             "Number of nodes to BLOCK", min_value=1, max_value=50, value=5
         )
 
-        containment_method = st.selectbox(
-            "Select containment strategy",
+        containment_methods = st.multiselect(
+            "Select containment strategy (one or more)",
             ["Degree Centrality", "Betweenness Centrality", "PageRank"],
-            key="containment_method",
+            default=["Degree Centrality"],
         )
 
         if st.button("Run Containment Simulation", key="containment_run_btn"):
-            # ---- Baseline spread (no blocking) ------------------------------------
+
+            if not containment_methods:
+                st.error("❌ Please select at least one containment strategy.")
+                st.stop()
+
+            # ---- Baseline (run once) -----------------------------------
             with st.spinner("Running baseline (no containment)..."):
                 infected_baseline = set()
                 for _ in range(runs_containment):
-                    infected = simulate_ic_spread(G, seeds, p_sim)
-                    infected_baseline |= infected
-
-            st.write("### ✅ Baseline Spread (No Containment)")
-            plot_graph_new(
-                G, affected=infected_baseline, title="Baseline Spread (No Blocking)"
-            )
-
-            # ---- Determine nodes to block ----------------------------------------
-            st.subheader("Blocked Nodes Based on Centrality")
-
-            if containment_method == "Degree Centrality":
-                centrality = nx.degree_centrality(G)
-            elif containment_method == "Betweenness Centrality":
-                centrality = nx.betweenness_centrality(G)
-            else:
-                centrality = nx.pagerank(G)
-
-            # Pick top-k
-            blocked_nodes = sorted(centrality, key=centrality.get, reverse=True)[
-                :k_block
-            ]
-
-            st.success(f"Blocked Nodes ({containment_method}): {blocked_nodes}")
-
-            # ---- Contained Spread (after blocking) --------------------------------
-            with st.spinner("Running spread with containment..."):
-                infected_contained = set()
-                for _ in range(runs_containment):
-                    infected = simulate_ic_spread(
-                        G, seeds, p_sim, blocked=blocked_nodes
-                    )
-                    infected_contained |= infected
-
-            st.write("### ✅ Spread After Containment")
-            plot_graph_new(
-                G, affected=infected_contained, title="Spread After Blocking Key Nodes"
-            )
-
-            # ---- Comparison -------------------------------------------------------
-            st.subheader("📊 Containment Effectiveness")
+                    infected_baseline |= simulate_ic_spread(G, seeds, p_sim)
 
             baseline_count = len(infected_baseline)
-            contained_count = len(infected_contained)
-            reduction = baseline_count - contained_count
-            reduction_pct = (
-                (reduction / baseline_count) * 100 if baseline_count > 0 else 0
-            )
 
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Baseline Infected", baseline_count)
-            col2.metric("After Containment", contained_count)
-            col3.metric("Reduction (%)", f"{reduction_pct:.2f}%")
+            st.write("### ✅ Baseline Spread (No Containment)")
+            plot_graph_new(G, affected=infected_baseline, title="Baseline Spread")
 
-            st.write("### ✅ Visual Comparison")
+            # ---- Run each containment strategy -------------------------
+            results = {}
 
-            compare_fig = plt.figure(figsize=(4, 2))
-            st.bar_chart(
-                {"Baseline": baseline_count, "After Containment": contained_count}
-            )
+            for method in containment_methods:
+                st.subheader(f"🛡️ Containment: {method}")
 
-            st.session_state["con_data"] = {
-                "method": containment_method,
-                "blocked_nodes": blocked_nodes,
-                "baseline_infected": baseline_count,
-                "contained_infected": contained_count,
-                "reduction_pct": reduction_pct,
-                "infection_probability": p_sim,
-                "runs": runs_containment,
-            }
+                centrality = get_centrality(G, method)
+                blocked_nodes = sorted(centrality, key=centrality.get, reverse=True)[
+                    :k_block
+                ]
+
+                with st.spinner(f"Running containment using {method}..."):
+                    infected_contained = set()
+                    for _ in range(runs_containment):
+                        infected_contained |= simulate_ic_spread(
+                            G, seeds, p_sim, blocked=blocked_nodes
+                        )
+
+                contained_count = len(infected_contained)
+                reduction = baseline_count - contained_count
+                reduction_pct = (
+                    (reduction / baseline_count) * 100 if baseline_count else 0
+                )
+
+                # ---- Visuals per method --------------------------------
+                plot_graph_new(
+                    G,
+                    affected=infected_contained,
+                    title=f"Spread After {method}",
+                )
+
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Baseline", baseline_count)
+                col2.metric("After Containment", contained_count)
+                col3.metric("Reduction (%)", f"{reduction_pct:.2f}%")
+
+                # ---- Store result --------------------------------------
+                results[method] = {
+                    "blocked_nodes": blocked_nodes,
+                    "baseline_infected": baseline_count,
+                    "contained_infected": contained_count,
+                    "reduction_pct": reduction_pct,
+                    "infection_probability": p_sim,
+                    "runs": runs_containment,
+                }
+
+            # ---- Comparison Mode --------------------------------------
+            if len(results) > 1:
+                st.subheader("📊 Containment Strategy Comparison")
+
+                comp_df = pd.DataFrame.from_dict(results, orient="index")[
+                    ["contained_infected", "reduction_pct"]
+                ]
+
+                st.dataframe(comp_df)
+
+                st.bar_chart(comp_df["contained_infected"])
+
+            # ---- Persist in session -----------------------------------
+            st.session_state["con_data"] = results
 
         if st.button("💾 Save Containment Results", key=f"save_cont_{ds_id}"):
             if "con_data" not in st.session_state:
