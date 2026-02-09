@@ -687,7 +687,6 @@ if st.session_state.user:
 
     if st.sidebar.button("🚪 Logout"):
         st.session_state.clear()
-        st.experimental_rerun()
 else:
     st.sidebar.info("Not logged in")
 
