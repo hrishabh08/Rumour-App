@@ -3,6 +3,8 @@ import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
 from pathlib import Path
+
+# import torch.nn.functional as F
 from datetime import datetime
 import json
 import os
@@ -23,8 +25,10 @@ from datetime import date
 
 import tensorflow as tf
 from spektral.layers import GCNConv
+
 from tensorflow.keras import Model, Input
-from tensorflow.keras.layers import Dense
+
+# from tensorflow.keras.layers import Dense
 from spektral.data import Graph
 from spektral.data import Dataset
 
@@ -108,6 +112,47 @@ def get_centrality(G, method: str):
         return nx.pagerank(G)
     else:
         raise ValueError(f"Unknown method: {method}")
+
+
+# class GCN(torch.nn.Module):
+#     def __init__(self, in_channels, hidden_channels, out_channels):
+#         super().__init__()
+#         self.conv1 = GCNConv(in_channels, hidden_channels)
+#         self.conv2 = GCNConv(hidden_channels, out_channels)
+
+#     def forward(self, x, edge_index):
+#         x = self.conv1(x, edge_index)
+#         x = F.relu(x)
+#         x = self.conv2(x, edge_index)
+#         return x
+
+
+# @st.cache_resource
+# def load_model():
+#     model = GCN(1, 16, 2)
+#     model.load_state_dict(torch.load("gcn_model.pth", map_location="cpu"))
+#     model.eval()
+#     return model
+
+
+def ai_select_nodes(prob_dict, G, k):
+    """
+    Combine ML prediction + graph importance
+    """
+    degree = nx.degree_centrality(G)
+    pagerank = nx.pagerank(G)
+
+    score = {}
+
+    for n in G.nodes():
+        score[n] = (
+            0.6 * prob_dict.get(n, 0)  # ML prediction
+            + 0.2 * degree.get(n, 0)
+            + 0.2 * pagerank.get(n, 0)
+        )
+
+    ranked = sorted(score, key=score.get, reverse=True)
+    return ranked[:k]
 
 
 def load_json(ds_id: str, filename: str) -> dict | None:
@@ -702,6 +747,7 @@ menu = st.sidebar.selectbox(
         "Visualization",
         "Simulation",
         "Containment",
+        "AI Containment",
         "Reports",
     ],
 )
@@ -918,13 +964,23 @@ elif menu == "Visualization":
                         f"Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}, Seeds: {len(seeds)}"
                     )
                 if st.button("💾 Save Visualization", key=f"save_vis_{ds_id}"):
+                    density = nx.density(G)
+                    avg_degree = sum(dict(G.degree()).values()) / G.number_of_nodes()
+                    clustering = nx.average_clustering(G)
+
                     payload = {
                         "dataset_id": ds_id,
                         "saved_at": datetime.utcnow().isoformat(),
                         "nodes": G.number_of_nodes(),
                         "edges": G.number_of_edges(),
                         "seeds": seeds,
+                        "graph_metrics": {
+                            "density": density,
+                            "avg_degree": avg_degree,
+                            "clustering": clustering,
+                        },
                     }
+
                     save_json(ds_id, "visualization.json", payload)
                     st.success("Visualization saved successfully")
     except Exception as e:
@@ -1045,11 +1101,13 @@ elif menu == "Simulation":
 
             infected_final = set()
             infected_list = []
-
+            spread_runs = []
             for _ in range(mc_runs):
                 infected = simulate_ic_predicted(G, seeds, prob_dict, base_p=p_sim)
                 infected_list.append(len(infected))
                 infected_final |= infected
+                layers = independent_cascade(G, seeds, p=p_sim)
+                spread_runs.append([list(layer) for layer in layers])
 
             st.write("### 📊 Infection Distribution Summary")
             st.dataframe(pd.Series(infected_list).describe())
@@ -1065,6 +1123,7 @@ elif menu == "Simulation":
                 "high_risk_nodes": high_risk,
                 "infected_final_count": len(infected_final),
                 "infection_distribution": infected_list,
+                "spread_layers": spread_runs,  # 🔥 NEW
             }
 
             # ==========================================================
@@ -1236,20 +1295,131 @@ elif menu == "Containment":
     except Exception as e:
         show_exception(e, "Containment Page")
 
+
+elif menu == "AI Containment":
+    try:
+        st.title("🤖 AI-Based Rumor Containment (ML-Based)")
+
+        if not st.session_state["user"]:
+            st.warning("⚠️ Please login first.")
+            st.stop()
+
+        df = list_datasets(owner=st.session_state["user"])
+        if df.empty:
+            st.info("No datasets yet.")
+            st.stop()
+
+        selected = st.selectbox(
+            "Select dataset",
+            df["name"] + " — " + df["id"],
+        )
+        ds_id = selected.split(" — ")[-1]
+
+        edges = read_edges(ds_id)
+        seeds = read_seeds(ds_id)
+
+        if not edges:
+            st.warning("No edges found")
+            st.stop()
+
+        G = build_graph(edges)
+        nodes = list(G.nodes())
+
+        p_sim = st.slider("Infection probability", 0.01, 1.0, 0.1)
+        k_block = st.number_input("Nodes to block", 1, 50, 5)
+
+        if st.button("🚀 Run AI Containment"):
+
+            with st.spinner("Running baseline (no containment)..."):
+                infected_baseline = set()
+                runs_containment = st.slider("Monte Carlo runs", 50, 500, 200)
+                for _ in range(runs_containment):
+                    infected_baseline |= simulate_ic_spread(G, seeds, p_sim)
+
+            baseline_count = len(infected_baseline)
+
+            st.write("### ✅ Baseline Spread (No Containment)")
+            plot_graph_new(G, affected=infected_baseline, title="Baseline Spread")
+
+            # 🔹 STEP 1: Generate labels
+            freq, _ = generate_ic_labels(G, seeds, p=p_sim, runs=200)
+            y_binary = np.array([(freq[n] > 0) for n in nodes]).astype(int)
+
+            # 🔹 STEP 2: Train ML model
+            X = compute_node_features(G)
+            X = X.reindex(nodes).fillna(0.0)
+
+            clf, _, _ = train_predict_model(X.values, y_binary)
+
+            probs = clf.predict_proba(X.values)[:, 1]
+            prob_dict = {n: probs[i] for i, n in enumerate(nodes)}
+
+            # 🔹 STEP 3: AI Node Selection
+            blocked_nodes = ai_select_nodes(prob_dict, G, k_block)
+
+            st.write("### 🚫 AI Selected Nodes")
+            st.write(blocked_nodes)
+
+            # 🔹 STEP 4: Baseline
+            baseline = set()
+            for _ in range(100):
+                baseline |= simulate_ic_spread(G, seeds, p_sim)
+
+            # 🔹 STEP 5: Containment
+            contained = set()
+            for _ in range(100):
+                contained |= simulate_ic_spread(G, seeds, p_sim, blocked=blocked_nodes)
+
+            # 🔹 STEP 6: Metrics
+            b = len(baseline)
+            c = len(contained)
+            reduction = ((b - c) / b) * 100 if b else 0
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Baseline", b)
+            col2.metric("After AI", c)
+            col3.metric("Reduction %", f"{reduction:.2f}")
+
+            results = {
+                "blocked_nodes": blocked_nodes,
+                "baseline_infected": b,
+                "contained_infected": c,
+                "reduction_pct": reduction,
+                "infection_probability": p_sim,
+                "runs": runs_containment,
+                "model_type": "Node2Vec + RandomForest",  # NEW
+            }
+            st.session_state["AI_con_data"] = results
+
+            # 🔹 STEP 7: Visualization
+            plot_graph_new(G, affected=contained, title="AI Containment Result")
+
+        if st.button("💾 Save AI Containment Results", key=f"save_cont_{ds_id}"):
+            if "AI_con_data" not in st.session_state:
+                st.error("❌ Run AI Containment first.")
+                st.stop()
+
+            payload = {
+                "dataset_id": ds_id,
+                "saved_at": datetime.utcnow().isoformat(),
+                **st.session_state["AI_con_data"],
+            }
+            st.success("Going to save AI Containment results saved")
+            save_json(ds_id, "AIcontainment.json", payload)
+
+    except Exception as e:
+        show_exception(e, "AI Containment")
+
 # --- Reports ---
 elif menu == "Reports":
     try:
-        st.title("📑 Dataset Reports")
+        st.title("📑 Comprehensive Rumor Analysis Report")
 
         if not st.session_state["user"]:
             st.warning("Login first")
             st.stop()
 
         df = list_datasets(owner=st.session_state["user"])
-        if df.empty:
-            st.info("No datasets available")
-            st.stop()
-
         selected = st.selectbox("Select dataset", df["name"] + " — " + df["id"])
         ds_id = selected.split(" — ")[-1]
 
@@ -1257,34 +1427,263 @@ elif menu == "Reports":
         vis = load_json(ds_id, "visualization.json")
         sim = load_json(ds_id, "simulation.json")
         cont = load_json(ds_id, "containment.json")
+        ai = load_json(ds_id, "AIcontainment.json")
 
-        report = {
-            "dataset": meta,
-            "visualization": vis,
-            "simulation": sim,
-            "containment": cont,
-            "generated_at": datetime.utcnow().isoformat(),
+        # ================= STYLE =================
+        st.markdown(
+            """
+        <style>
+        .card {
+            background: #ffffff;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0px 4px 12px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
         }
-
-        st.subheader("📄 Report Preview")
-        st.json(report)
-
-        # Save report automatically
-        save_json(ds_id, "report.json", report)
-
-        # Download
-        buf = io.StringIO()
-        json.dump(report, buf, indent=2)
-
-        st.download_button(
-            "⬇️ Download Full Report (JSON)",
-            buf.getvalue(),
-            file_name=f"report_{ds_id}.json",
-            mime="application/json",
+        .section-title {
+            font-size: 22px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        </style>
+        """,
+            unsafe_allow_html=True,
         )
-    except Exception as e:
-        show_exception(e, "Reports Page")
 
+        # ================= 1. DATASET DETAILS =================
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-title">📊 Dataset Details</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.write(f"**Dataset Name:** {meta['name']}")
+        st.write(f"**Owner:** {meta['owner']}")
+        st.write(f"**Created At:** {meta['created_at']}")
+
+        st.write(
+            """
+        **What is this dataset?**  
+        This dataset represents a **network graph**, where:
+        - Nodes = Users / Entities  
+        - Edges = Connections / Interactions  
+        - Seeds = Initial rumor sources  
+        """
+        )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # ================= 2. NETWORK VISUALIZATION =================
+        if vis:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-title">🌐 Network Visualization</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.write(f"Nodes: {vis['nodes']}")
+            st.write(f"Edges: {vis['edges']}")
+            st.write(f"Seed Nodes: {vis['seeds']}")
+
+            st.write(
+                """
+            **What is Visualization?**  
+            Network visualization helps us understand:
+            - Structure of connections  
+            - How dense or sparse the network is  
+            - Where the rumor starts (seed nodes)  
+            """
+            )
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ================= SPREAD DYNAMICS =================
+        if sim and "spread_layers" in sim:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-title">📈 Spread Dynamics</div>',
+                unsafe_allow_html=True,
+            )
+
+            runs = sim["spread_layers"]
+            curves = []
+
+            for run in runs:
+                c = 0
+                temp = []
+                for layer in run:
+                    c += len(layer)
+                    temp.append(c)
+                curves.append(temp)
+
+            max_len = max(len(c) for c in curves)
+
+            avg_curve = []
+            for i in range(max_len):
+                vals = [c[i] if i < len(c) else c[-1] for c in curves]
+                avg_curve.append(sum(vals) / len(vals))
+
+            fig = plt.figure()
+            plt.plot(avg_curve)
+            plt.title("Rumor Spread Over Time")
+            plt.xlabel("Steps")
+            plt.ylabel("Infected Nodes")
+            st.pyplot(fig)
+
+            st.write(
+                "The curve shows how quickly the rumor propagates. "
+                "A steep rise indicates rapid cascade behavior."
+            )
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ================= 3. SIMULATION DETAILS =================
+        if sim:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-title">🔥 Rumor Spread Simulation</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.write(f"Method Used: {sim['method']}")
+            st.write(f"Infection Probability: {sim['infection_probability']}")
+            st.write(f"Monte Carlo Runs: {sim['mc_runs']}")
+            st.write(f"Final Infected Nodes: {sim['infected_final_count']}")
+
+            st.write(
+                """
+            **What is Monte Carlo Simulation?**  
+            Monte Carlo simulation runs the spread multiple times (randomized) to:
+            - Capture uncertainty  
+            - Estimate average behavior  
+            - Avoid single-run bias  
+
+            **What is Infection Probability?**  
+            Probability that a node infects its neighbor.
+
+            **What is Node2Vec?**  
+            Node2Vec converts graph nodes into numerical vectors (embeddings) so machine learning models can understand network structure.
+
+            **What is Random Forest?**  
+            A machine learning model that uses multiple decision trees to predict which nodes are likely to be infected.
+
+            **What is GNN (Graph Neural Network)?**  
+            A deep learning model that directly learns from graph structure and relationships.
+            """
+            )
+
+            # Distribution graph
+            fig = plt.figure()
+            plt.hist(sim["infection_distribution"], bins=10)
+            plt.title("Infection Distribution")
+            st.pyplot(fig)
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ================= 4. HIGH RISK NODES =================
+        if sim:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-title">🧠 High Risk Nodes</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.write(sim["high_risk_nodes"])
+
+            st.write(
+                """
+            These nodes are predicted to be highly influential in spreading the rumor.
+            Blocking or monitoring these nodes can significantly reduce spread.
+            """
+            )
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ================= 5. CONTAINMENT =================
+        if cont:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-title">🛡️ Containment Strategies</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.write(
+                """
+            **What is Containment?**  
+            Containment means blocking or controlling certain nodes to stop rumor spread.
+
+            **Methods Explained:**
+            - Degree Centrality → nodes with most connections  
+            - Betweenness Centrality → nodes acting as bridges  
+            - PageRank → nodes with high global importance  
+            """
+            )
+
+            methods = []
+            reductions = []
+
+            for m, d in cont.items():
+                if m in ["dataset_id", "saved_at"]:
+                    continue
+
+                st.write(f"**{m}**")
+                st.write(f"Blocked Nodes: {d['blocked_nodes']}")
+                st.write(f"Reduction: {d['reduction_pct']:.2f}%")
+
+                methods.append(m)
+                reductions.append(d["reduction_pct"])
+
+            dfc = pd.DataFrame({"Method": methods, "Reduction": reductions})
+            st.bar_chart(dfc.set_index("Method"))
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ================= 6. AI CONTAINMENT =================
+        if ai:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-title">🤖 AI-Based Containment</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.write(f"Blocked Nodes: {ai['blocked_nodes']}")
+            st.write(f"Reduction: {ai['reduction_pct']:.2f}%")
+
+            st.write(
+                """
+            **What is AI Containment?**  
+            AI uses machine learning predictions to:
+            - Identify high-risk nodes  
+            - Adapt to network patterns  
+            - Provide smarter blocking strategies  
+
+            Unlike traditional methods, AI considers both:
+            - Network structure  
+            - Learned behavior patterns  
+            """
+            )
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ================= 7. FINAL INSIGHTS =================
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-title">🧠 Final Insights</div>', unsafe_allow_html=True
+        )
+
+        st.write(
+            """
+        • Dense networks lead to faster rumor spread  
+        • A small number of nodes control most of the spread  
+        • Centrality-based methods are effective  
+        • AI provides adaptive and scalable containment  
+        """
+        )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    except Exception as e:
+        show_exception(e, "Report Page")
 # End of file
 
 # Ensure session state is initialized
