@@ -21,7 +21,7 @@ import numpy as np
 from matplotlib.patches import Patch
 import matplotlib.cm as cm
 from datetime import date
-
+import reportlab
 
 import tensorflow as tf
 from spektral.layers import GCNConv
@@ -1411,6 +1411,7 @@ elif menu == "AI Containment":
         show_exception(e, "AI Containment")
 
 # --- Reports ---
+# --- Reports ---
 elif menu == "Reports":
     try:
         st.title("📑 Comprehensive Rumor Analysis Report")
@@ -1420,6 +1421,10 @@ elif menu == "Reports":
             st.stop()
 
         df = list_datasets(owner=st.session_state["user"])
+        if df.empty:
+            st.info("No datasets yet.")
+            st.stop()
+
         selected = st.selectbox("Select dataset", df["name"] + " — " + df["id"])
         ds_id = selected.split(" — ")[-1]
 
@@ -1428,6 +1433,11 @@ elif menu == "Reports":
         sim = load_json(ds_id, "simulation.json")
         cont = load_json(ds_id, "containment.json")
         ai = load_json(ds_id, "AIcontainment.json")
+
+        # Load graph for additional analysis
+        edges = read_edges(ds_id)
+        seeds = read_seeds(ds_id)
+        G = build_graph(edges) if edges else None
 
         # ================= STYLE =================
         st.markdown(
@@ -1445,10 +1455,91 @@ elif menu == "Reports":
             font-weight: bold;
             color: #2c3e50;
         }
+        .executive-summary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        .metric-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            border-left: 4px solid #667eea;
+        }
+        .recommendation-box {
+            background: #e8f5e9;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #4caf50;
+            margin: 10px 0;
+        }
+        .warning-box {
+            background: #fff3e0;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #ff9800;
+            margin: 10px 0;
+        }
         </style>
         """,
             unsafe_allow_html=True,
         )
+
+        # ================= EXECUTIVE SUMMARY =================
+        st.markdown('<div class="executive-summary">', unsafe_allow_html=True)
+        st.markdown("## 📋 Executive Summary")
+
+        # Generate dynamic summary
+        summary_points = []
+
+        if vis:
+            network_size = (
+                "large"
+                if vis["nodes"] > 1000
+                else "medium" if vis["nodes"] > 100 else "small"
+            )
+            summary_points.append(
+                f"Network contains **{vis['nodes']} nodes** and **{vis['edges']} edges** ({network_size} scale)"
+            )
+
+        if sim:
+            spread_severity = (
+                "high"
+                if sim["infected_final_count"] > vis["nodes"] * 0.5
+                else (
+                    "moderate"
+                    if sim["infected_final_count"] > vis["nodes"] * 0.2
+                    else "low"
+                )
+            )
+            summary_points.append(
+                f"Rumor spread severity: **{spread_severity}** ({sim['infected_final_count']} nodes infected)"
+            )
+
+        if cont:
+            best_method = max(
+                cont.items(),
+                key=lambda x: (
+                    x[1].get("reduction_pct", 0) if isinstance(x[1], dict) else 0
+                ),
+            )
+            if isinstance(best_method[1], dict):
+                summary_points.append(
+                    f"Most effective containment: **{best_method[0]}** ({best_method[1]['reduction_pct']:.1f}% reduction)"
+                )
+
+        if ai:
+            summary_points.append(
+                f"AI containment achieved **{ai['reduction_pct']:.1f}%** reduction"
+            )
+
+        for point in summary_points:
+            st.markdown(f"• {point}")
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
         # ================= 1. DATASET DETAILS =================
         st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -1457,23 +1548,128 @@ elif menu == "Reports":
             unsafe_allow_html=True,
         )
 
-        st.write(f"**Dataset Name:** {meta['name']}")
-        st.write(f"**Owner:** {meta['owner']}")
-        st.write(f"**Created At:** {meta['created_at']}")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("Dataset Name", meta["name"])
+            st.markdown("</div>", unsafe_allow_html=True)
+        with col2:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("Owner", meta["owner"])
+            st.markdown("</div>", unsafe_allow_html=True)
+        with col3:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("Created", meta["created_at"][:10])
+            st.markdown("</div>", unsafe_allow_html=True)
 
-        st.write(
+        with st.expander("ℹ️ What is this dataset?"):
+            st.write(
+                """
+            This dataset represents a **network graph** where:
+            - **Nodes** = Users, entities, or endpoints in the network
+            - **Edges** = Connections, relationships, or communication channels between nodes
+            - **Seeds** = Initial rumor sources (where the misinformation originates)
+
+            The analysis examines how information (or misinformation) propagates through this network structure.
             """
-        **What is this dataset?**  
-        This dataset represents a **network graph**, where:
-        - Nodes = Users / Entities  
-        - Edges = Connections / Interactions  
-        - Seeds = Initial rumor sources  
-        """
-        )
-
+            )
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # ================= 2. NETWORK VISUALIZATION =================
+        # ================= 2. NETWORK TOPOLOGY ANALYSIS (NEW) =================
+        if G and vis:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-title">🔬 Network Topology Analysis</div>',
+                unsafe_allow_html=True,
+            )
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            density = nx.density(G)
+            avg_degree = sum(dict(G.degree()).values()) / G.number_of_nodes()
+            clustering = nx.average_clustering(G)
+
+            # Calculate additional metrics
+            try:
+                if nx.is_connected(G):
+                    diameter = nx.diameter(G)
+                    avg_path = nx.average_shortest_path_length(G)
+                else:
+                    largest_cc = max(nx.connected_components(G), key=len)
+                    subgraph = G.subgraph(largest_cc)
+                    diameter = nx.diameter(subgraph)
+                    avg_path = nx.average_shortest_path_length(subgraph)
+            except:
+                diameter = "N/A"
+                avg_path = "N/A"
+
+            num_components = nx.number_connected_components(G)
+
+            with col1:
+                st.metric("Density", f"{density:.4f}")
+            with col2:
+                st.metric("Avg Degree", f"{avg_degree:.2f}")
+            with col3:
+                st.metric("Clustering Coef.", f"{clustering:.4f}")
+            with col4:
+                st.metric("Components", num_components)
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.metric(
+                    "Network Diameter",
+                    diameter if isinstance(diameter, str) else f"{diameter}",
+                )
+            with col2:
+                st.metric(
+                    "Avg Path Length",
+                    avg_path if isinstance(avg_path, str) else f"{avg_path:.2f}",
+                )
+
+            # Degree Distribution
+            st.subheader("Degree Distribution")
+            degrees = [d for n, d in G.degree()]
+            fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+
+            ax[0].hist(degrees, bins=30, edgecolor="black", alpha=0.7, color="#667eea")
+            ax[0].set_xlabel("Degree")
+            ax[0].set_ylabel("Frequency")
+            ax[0].set_title("Degree Distribution (Linear)")
+
+            # Log-log plot for power law detection
+            from collections import Counter
+
+            degree_count = Counter(degrees)
+            deg, cnt = zip(*sorted(degree_count.items()))
+            ax[1].loglog(deg, cnt, "o", markersize=5, color="#764ba2")
+            ax[1].set_xlabel("Degree (log)")
+            ax[1].set_ylabel("Count (log)")
+            ax[1].set_title("Degree Distribution (Log-Log)")
+
+            plt.tight_layout()
+            st.pyplot(fig)
+
+            with st.expander("ℹ️ Understanding Network Metrics"):
+                st.write(
+                    """
+                - **Density**: Ratio of actual edges to possible edges. Higher density = more interconnected network.
+                - **Average Degree**: Mean number of connections per node.
+                - **Clustering Coefficient**: Probability that neighbors of a node are also connected.
+                - **Diameter**: Longest shortest path between any two nodes.
+                - **Average Path Length**: Mean shortest path between all node pairs.
+                - **Components**: Number of disconnected subgraphs.
+
+                **Implications for Rumor Spread:**
+                - High density → Faster spread, harder to contain
+                - High clustering → Local containment possible
+                - Small diameter → Rapid network-wide propagation
+                """
+                )
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ================= 3. NETWORK VISUALIZATION =================
         if vis:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.markdown(
@@ -1481,27 +1677,32 @@ elif menu == "Reports":
                 unsafe_allow_html=True,
             )
 
-            st.write(f"Nodes: {vis['nodes']}")
-            st.write(f"Edges: {vis['edges']}")
-            st.write(f"Seed Nodes: {vis['seeds']}")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Nodes", vis["nodes"])
+            with col2:
+                st.metric("Total Edges", vis["edges"])
+            with col3:
+                st.metric("Seed Nodes", len(vis["seeds"]))
 
-            st.write(
-                """
-            **What is Visualization?**  
-            Network visualization helps us understand:
-            - Structure of connections  
-            - How dense or sparse the network is  
-            - Where the rumor starts (seed nodes)  
-            """
-            )
+            if "graph_metrics" in vis:
+                st.subheader("Graph Metrics at Visualization Time")
+                gm = vis["graph_metrics"]
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Density", f"{gm.get('density', 0):.4f}")
+                with col2:
+                    st.metric("Avg Degree", f"{gm.get('avg_degree', 0):.2f}")
+                with col3:
+                    st.metric("Clustering", f"{gm.get('clustering', 0):.4f}")
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ================= SPREAD DYNAMICS =================
+        # ================= 4. SPREAD DYNAMICS =================
         if sim and "spread_layers" in sim:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.markdown(
-                '<div class="section-title">📈 Spread Dynamics</div>',
+                '<div class="section-title">📈 Spread Dynamics Analysis</div>',
                 unsafe_allow_html=True,
             )
 
@@ -1518,172 +1719,860 @@ elif menu == "Reports":
 
             max_len = max(len(c) for c in curves)
 
+            # Calculate statistics
             avg_curve = []
+            min_curve = []
+            max_curve = []
+            std_curve = []
+
             for i in range(max_len):
                 vals = [c[i] if i < len(c) else c[-1] for c in curves]
-                avg_curve.append(sum(vals) / len(vals))
+                avg_curve.append(np.mean(vals))
+                min_curve.append(np.min(vals))
+                max_curve.append(np.max(vals))
+                std_curve.append(np.std(vals))
 
-            fig = plt.figure()
-            plt.plot(avg_curve)
-            plt.title("Rumor Spread Over Time")
-            plt.xlabel("Steps")
-            plt.ylabel("Infected Nodes")
+            # Calculate velocity (rate of change)
+            velocity = [0] + [
+                avg_curve[i] - avg_curve[i - 1] for i in range(1, len(avg_curve))
+            ]
+            peak_velocity_step = velocity.index(max(velocity))
+            peak_velocity = max(velocity)
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Peak Spread Velocity", f"{peak_velocity:.1f} nodes/step")
+            with col2:
+                st.metric("Peak at Step", peak_velocity_step)
+            with col3:
+                saturation_pct = (avg_curve[-1] / vis["nodes"] * 100) if vis else 0
+                st.metric("Saturation", f"{saturation_pct:.1f}%")
+
+            # Plot with confidence interval
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+            # Spread curve with confidence band
+            x = range(len(avg_curve))
+            axes[0].fill_between(
+                x, min_curve, max_curve, alpha=0.3, color="#667eea", label="Range"
+            )
+            axes[0].plot(avg_curve, color="#667eea", linewidth=2, label="Average")
+            axes[0].set_title("Rumor Spread Over Time")
+            axes[0].set_xlabel("Time Steps")
+            axes[0].set_ylabel("Cumulative Infected Nodes")
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+
+            # Velocity curve
+            axes[1].bar(range(len(velocity)), velocity, color="#764ba2", alpha=0.7)
+            axes[1].axhline(
+                y=np.mean(velocity),
+                color="red",
+                linestyle="--",
+                label=f"Avg: {np.mean(velocity):.1f}",
+            )
+            axes[1].set_title("Spread Velocity (New Infections per Step)")
+            axes[1].set_xlabel("Time Steps")
+            axes[1].set_ylabel("New Infections")
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
+
+            plt.tight_layout()
             st.pyplot(fig)
 
-            st.write(
-                "The curve shows how quickly the rumor propagates. "
-                "A steep rise indicates rapid cascade behavior."
-            )
+            with st.expander("ℹ️ Interpreting Spread Dynamics"):
+                st.write(
+                    """
+                **Spread Curve Analysis:**
+                - **S-curve pattern**: Typical epidemic spread (slow start → rapid growth → saturation)
+                - **Linear growth**: Indicates constant spread rate, possibly due to network structure
+                - **Exponential growth**: Highly concerning, requires immediate intervention
+
+                **Velocity Analysis:**
+                - Peak velocity indicates when the rumor spreads fastest
+                - Early peak → Network has high initial connectivity from seeds
+                - Late peak → Rumor takes time to reach highly connected nodes
+                """
+                )
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ================= 3. SIMULATION DETAILS =================
+        # ================= 5. SIMULATION DETAILS =================
         if sim:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.markdown(
-                '<div class="section-title">🔥 Rumor Spread Simulation</div>',
+                '<div class="section-title">🔥 Rumor Spread Simulation Results</div>',
                 unsafe_allow_html=True,
             )
 
-            st.write(f"Method Used: {sim['method']}")
-            st.write(f"Infection Probability: {sim['infection_probability']}")
-            st.write(f"Monte Carlo Runs: {sim['mc_runs']}")
-            st.write(f"Final Infected Nodes: {sim['infected_final_count']}")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Method", sim["method"].split()[0])
+            with col2:
+                st.metric("Infection Prob.", f"{sim['infection_probability']:.2f}")
+            with col3:
+                st.metric("MC Runs", sim["mc_runs"])
+            with col4:
+                st.metric("Final Infected", sim["infected_final_count"])
 
-            st.write(
-                """
-            **What is Monte Carlo Simulation?**  
-            Monte Carlo simulation runs the spread multiple times (randomized) to:
-            - Capture uncertainty  
-            - Estimate average behavior  
-            - Avoid single-run bias  
+            # Distribution analysis
+            st.subheader("Infection Distribution Analysis")
 
-            **What is Infection Probability?**  
-            Probability that a node infects its neighbor.
+            infection_data = sim["infection_distribution"]
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
-            **What is Node2Vec?**  
-            Node2Vec converts graph nodes into numerical vectors (embeddings) so machine learning models can understand network structure.
-
-            **What is Random Forest?**  
-            A machine learning model that uses multiple decision trees to predict which nodes are likely to be infected.
-
-            **What is GNN (Graph Neural Network)?**  
-            A deep learning model that directly learns from graph structure and relationships.
-            """
+            # Histogram
+            axes[0].hist(
+                infection_data, bins=20, edgecolor="black", alpha=0.7, color="#e74c3c"
             )
+            axes[0].axvline(
+                np.mean(infection_data),
+                color="blue",
+                linestyle="--",
+                label=f"Mean: {np.mean(infection_data):.1f}",
+            )
+            axes[0].axvline(
+                np.median(infection_data),
+                color="green",
+                linestyle="--",
+                label=f"Median: {np.median(infection_data):.1f}",
+            )
+            axes[0].set_xlabel("Infected Count")
+            axes[0].set_ylabel("Frequency")
+            axes[0].set_title("Infection Distribution")
+            axes[0].legend()
 
-            # Distribution graph
-            fig = plt.figure()
-            plt.hist(sim["infection_distribution"], bins=10)
-            plt.title("Infection Distribution")
+            # Box plot
+            axes[1].boxplot(infection_data, vert=True)
+            axes[1].set_ylabel("Infected Count")
+            axes[1].set_title("Distribution Box Plot")
+
+            # CDF
+            sorted_data = np.sort(infection_data)
+            cdf = np.arange(1, len(sorted_data) + 1) / len(sorted_data)
+            axes[2].plot(sorted_data, cdf, color="#3498db", linewidth=2)
+            axes[2].set_xlabel("Infected Count")
+            axes[2].set_ylabel("Cumulative Probability")
+            axes[2].set_title("Cumulative Distribution")
+            axes[2].grid(True, alpha=0.3)
+
+            plt.tight_layout()
             st.pyplot(fig)
 
+            # Statistics table
+            st.subheader("Statistical Summary")
+            stats_df = pd.DataFrame(
+                {
+                    "Statistic": [
+                        "Mean",
+                        "Median",
+                        "Std Dev",
+                        "Min",
+                        "Max",
+                        "25th Percentile",
+                        "75th Percentile",
+                    ],
+                    "Value": [
+                        f"{np.mean(infection_data):.2f}",
+                        f"{np.median(infection_data):.2f}",
+                        f"{np.std(infection_data):.2f}",
+                        f"{np.min(infection_data)}",
+                        f"{np.max(infection_data)}",
+                        f"{np.percentile(infection_data, 25):.2f}",
+                        f"{np.percentile(infection_data, 75):.2f}",
+                    ],
+                }
+            )
+            st.table(stats_df)
+
+            with st.expander("ℹ️ Understanding the Simulation"):
+                st.write(
+                    """
+                **Monte Carlo Simulation** runs the spread process multiple times with randomization to:
+                - Capture inherent uncertainty in real-world spreading
+                - Estimate average and worst-case scenarios
+                - Provide confidence in results
+
+                **Model Types:**
+                - **Node2Vec + Random Forest**: Converts graph structure to numerical embeddings, then uses ensemble learning
+                - **GNN (Graph Neural Network)**: Deep learning directly on graph structure
+
+                **Infection Probability**: The likelihood that an infected node transmits to each neighbor per time step.
+                """
+                )
+
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ================= 4. HIGH RISK NODES =================
-        if sim:
+        # ================= 6. HIGH RISK NODES =================
+        if sim and G:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.markdown(
-                '<div class="section-title">🧠 High Risk Nodes</div>',
+                '<div class="section-title">🎯 High Risk Node Analysis</div>',
                 unsafe_allow_html=True,
             )
 
-            st.write(sim["high_risk_nodes"])
+            high_risk = sim["high_risk_nodes"]
 
+            # Create detailed table
+            risk_data = []
+            for i, node in enumerate(high_risk):
+                node_degree = G.degree(node)
+                neighbors = list(G.neighbors(node))
+                risk_data.append(
+                    {
+                        "Rank": i + 1,
+                        "Node": node,
+                        "Degree": node_degree,
+                        "Neighbors": len(neighbors),
+                        "Is Seed": "✓" if node in seeds else "✗",
+                    }
+                )
+
+            risk_df = pd.DataFrame(risk_data)
+            st.dataframe(risk_df, use_container_width=True)
+
+            # Visualize high-risk node degrees
+            fig, ax = plt.subplots(figsize=(10, 4))
+            colors = [
+                "#e74c3c" if row["Is Seed"] == "✓" else "#3498db"
+                for _, row in risk_df.iterrows()
+            ]
+            ax.bar(range(len(risk_df)), risk_df["Degree"], color=colors)
+            ax.set_xticks(range(len(risk_df)))
+            ax.set_xticklabels(risk_df["Node"], rotation=45, ha="right")
+            ax.set_xlabel("Node")
+            ax.set_ylabel("Degree")
+            ax.set_title("High-Risk Nodes by Degree (Red = Seed)")
+            plt.tight_layout()
+            st.pyplot(fig)
+
+            st.markdown('<div class="warning-box">', unsafe_allow_html=True)
             st.write(
-                """
-            These nodes are predicted to be highly influential in spreading the rumor.
-            Blocking or monitoring these nodes can significantly reduce spread.
-            """
+                f"⚠️ **Critical Finding**: The top {len(high_risk)} high-risk nodes should be prioritized for monitoring or intervention."
             )
+            st.markdown("</div>", unsafe_allow_html=True)
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ================= 5. CONTAINMENT =================
+        # ================= 7. CONTAINMENT STRATEGIES =================
         if cont:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.markdown(
-                '<div class="section-title">🛡️ Containment Strategies</div>',
+                '<div class="section-title">🛡️ Containment Strategy Analysis</div>',
                 unsafe_allow_html=True,
             )
 
-            st.write(
-                """
-            **What is Containment?**  
-            Containment means blocking or controlling certain nodes to stop rumor spread.
-
-            **Methods Explained:**
-            - Degree Centrality → nodes with most connections  
-            - Betweenness Centrality → nodes acting as bridges  
-            - PageRank → nodes with high global importance  
-            """
-            )
-
             methods = []
+            baseline_vals = []
+            contained_vals = []
             reductions = []
+            blocked_counts = []
 
             for m, d in cont.items():
                 if m in ["dataset_id", "saved_at"]:
                     continue
+                if isinstance(d, dict):
+                    methods.append(m)
+                    baseline_vals.append(d.get("baseline_infected", 0))
+                    contained_vals.append(d.get("contained_infected", 0))
+                    reductions.append(d.get("reduction_pct", 0))
+                    blocked_counts.append(len(d.get("blocked_nodes", [])))
 
-                st.write(f"**{m}**")
-                st.write(f"Blocked Nodes: {d['blocked_nodes']}")
-                st.write(f"Reduction: {d['reduction_pct']:.2f}%")
+            if methods:
+                # Summary table
+                summary_df = pd.DataFrame(
+                    {
+                        "Strategy": methods,
+                        "Nodes Blocked": blocked_counts,
+                        "Baseline Infected": baseline_vals,
+                        "After Containment": contained_vals,
+                        "Reduction (%)": [f"{r:.2f}%" for r in reductions],
+                    }
+                )
+                st.table(summary_df)
 
-                methods.append(m)
-                reductions.append(d["reduction_pct"])
+                # Comparison chart
+                fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-            dfc = pd.DataFrame({"Method": methods, "Reduction": reductions})
-            st.bar_chart(dfc.set_index("Method"))
+                x = np.arange(len(methods))
+                width = 0.35
+
+                axes[0].bar(
+                    x - width / 2,
+                    baseline_vals,
+                    width,
+                    label="Baseline",
+                    color="#e74c3c",
+                )
+                axes[0].bar(
+                    x + width / 2,
+                    contained_vals,
+                    width,
+                    label="After Containment",
+                    color="#27ae60",
+                )
+                axes[0].set_xticks(x)
+                axes[0].set_xticklabels(methods, rotation=45, ha="right")
+                axes[0].set_ylabel("Infected Nodes")
+                axes[0].set_title("Baseline vs Contained Infections")
+                axes[0].legend()
+
+                axes[1].bar(methods, reductions, color="#3498db")
+                axes[1].set_ylabel("Reduction (%)")
+                axes[1].set_title("Effectiveness by Strategy")
+                for i, v in enumerate(reductions):
+                    axes[1].text(i, v + 0.5, f"{v:.1f}%", ha="center")
+
+                plt.tight_layout()
+                st.pyplot(fig)
+
+                # Best strategy recommendation
+                best_idx = reductions.index(max(reductions))
+                st.markdown('<div class="recommendation-box">', unsafe_allow_html=True)
+                st.write(
+                    f"✅ **Recommended Strategy**: {methods[best_idx]} achieves the highest reduction of {reductions[best_idx]:.2f}%"
+                )
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            with st.expander("ℹ️ Understanding Containment Methods"):
+                st.write(
+                    """
+                **Degree Centrality**: Blocks nodes with the most connections. Simple and effective for hub-based networks.
+
+                **Betweenness Centrality**: Blocks nodes that act as bridges between communities. Effective for networks with clear community structure.
+
+                **PageRank**: Blocks nodes with high global importance (like Google's algorithm). Considers both direct and indirect influence.
+
+                **When to use each:**
+                - Dense networks → Degree Centrality
+                - Community-structured networks → Betweenness Centrality
+                - Complex hierarchical networks → PageRank
+                """
+                )
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ================= 6. AI CONTAINMENT =================
+        # ================= 8. AI CONTAINMENT =================
         if ai:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.markdown(
-                '<div class="section-title">🤖 AI-Based Containment</div>',
+                '<div class="section-title">🤖 AI-Based Containment Results</div>',
                 unsafe_allow_html=True,
             )
 
-            st.write(f"Blocked Nodes: {ai['blocked_nodes']}")
-            st.write(f"Reduction: {ai['reduction_pct']:.2f}%")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Baseline Infected", ai.get("baseline_infected", "N/A"))
+            with col2:
+                st.metric("After AI Containment", ai.get("contained_infected", "N/A"))
+            with col3:
+                st.metric("Reduction", f"{ai.get('reduction_pct', 0):.2f}%")
 
-            st.write(
+            st.subheader("AI-Selected Blocking Nodes")
+            st.write(ai.get("blocked_nodes", []))
+
+            # Compare AI vs traditional (if both available)
+            if cont and methods:
+                st.subheader("AI vs Traditional Methods Comparison")
+
+                all_methods = methods + ["AI-Based"]
+                all_reductions = reductions + [ai.get("reduction_pct", 0)]
+
+                fig, ax = plt.subplots(figsize=(10, 5))
+                colors = ["#3498db"] * len(methods) + ["#9b59b6"]
+                bars = ax.bar(all_methods, all_reductions, color=colors)
+
+                # Highlight best
+                best_overall = max(all_reductions)
+                for bar, red in zip(bars, all_reductions):
+                    if red == best_overall:
+                        bar.set_edgecolor("gold")
+                        bar.set_linewidth(3)
+
+                ax.set_ylabel("Reduction (%)")
+                ax.set_title("All Containment Methods Comparison")
+                for i, v in enumerate(all_reductions):
+                    ax.text(i, v + 0.5, f"{v:.1f}%", ha="center")
+
+                plt.xticks(rotation=45, ha="right")
+                plt.tight_layout()
+                st.pyplot(fig)
+
+            with st.expander("ℹ️ How AI Containment Works"):
+                st.write(
+                    f"""
+                **Model Used**: {ai.get('model_type', 'ML-Based')}
+
+                **Process:**
+                1. Train a machine learning model on network structure and spread patterns
+                2. Predict which nodes are most likely to spread the rumor
+                3. Select blocking candidates based on predicted risk AND network position
+                4. Simulate containment effectiveness
+
+                **Advantages over traditional methods:**
+                - Adapts to specific network characteristics
+                - Considers both local and global features
+                - Can learn from historical spread patterns
                 """
-            **What is AI Containment?**  
-            AI uses machine learning predictions to:
-            - Identify high-risk nodes  
-            - Adapt to network patterns  
-            - Provide smarter blocking strategies  
-
-            Unlike traditional methods, AI considers both:
-            - Network structure  
-            - Learned behavior patterns  
-            """
-            )
+                )
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ================= 7. FINAL INSIGHTS =================
+        # ================= 9. RECOMMENDATIONS =================
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown(
-            '<div class="section-title">🧠 Final Insights</div>', unsafe_allow_html=True
+            '<div class="section-title">💡 Recommendations & Action Items</div>',
+            unsafe_allow_html=True,
         )
 
-        st.write(
-            """
-        • Dense networks lead to faster rumor spread  
-        • A small number of nodes control most of the spread  
-        • Centrality-based methods are effective  
-        • AI provides adaptive and scalable containment  
-        """
-        )
+        recommendations = []
+
+        # Generate dynamic recommendations
+        if vis:
+            density = vis.get("graph_metrics", {}).get("density", 0)
+            if density > 0.1:
+                recommendations.append(
+                    {
+                        "priority": "High",
+                        "category": "Network Structure",
+                        "recommendation": "Network is highly dense. Consider implementing broad monitoring systems.",
+                        "action": "Deploy network-wide alerts for unusual activity patterns.",
+                    }
+                )
+            else:
+                recommendations.append(
+                    {
+                        "priority": "Medium",
+                        "category": "Network Structure",
+                        "recommendation": "Network has moderate density. Targeted interventions should be effective.",
+                        "action": "Focus resources on high-centrality nodes.",
+                    }
+                )
+
+        if sim:
+            if sim["infected_final_count"] > vis["nodes"] * 0.5:
+                recommendations.append(
+                    {
+                        "priority": "Critical",
+                        "category": "Spread Risk",
+                        "recommendation": f"Potential spread affects over 50% of network ({sim['infected_final_count']} nodes).",
+                        "action": "Implement immediate containment measures on identified high-risk nodes.",
+                    }
+                )
+
+        if cont:
+            best_method = max(
+                [
+                    (m, d.get("reduction_pct", 0))
+                    for m, d in cont.items()
+                    if isinstance(d, dict)
+                ],
+                key=lambda x: x[1],
+                default=None,
+            )
+            if best_method:
+                recommendations.append(
+                    {
+                        "priority": "High",
+                        "category": "Containment",
+                        "recommendation": f"{best_method[0]} is the most effective traditional method ({best_method[1]:.1f}% reduction).",
+                        "action": f"Prioritize blocking nodes identified by {best_method[0]} analysis.",
+                    }
+                )
+
+        if ai and ai.get("reduction_pct", 0) > 0:
+            recommendations.append(
+                {
+                    "priority": "High",
+                    "category": "AI Strategy",
+                    "recommendation": f"AI containment achieves {ai['reduction_pct']:.1f}% reduction.",
+                    "action": f"Block the following nodes: {', '.join(map(str, ai.get('blocked_nodes', [])[:5]))}...",
+                }
+            )
+
+        # Display recommendations
+        for rec in recommendations:
+            priority_color = {
+                "Critical": "#e74c3c",
+                "High": "#f39c12",
+                "Medium": "#3498db",
+                "Low": "#27ae60",
+            }
+            st.markdown(
+                f"""
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin: 10px 0; border-left: 4px solid {priority_color.get(rec['priority'], '#gray')}">
+                <strong>[{rec['priority']}] {rec['category']}</strong><br>
+                {rec['recommendation']}<br>
+                <em>Action: {rec['action']}</em>
+            </div>
+            """,
+                unsafe_allow_html=True,
+            )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # ================= 10. FINAL INSIGHTS =================
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-title">🧠 Key Insights Summary</div>',
+            unsafe_allow_html=True,
+        )
+
+        insights = [
+            "Dense networks lead to faster rumor spread and require broader containment strategies",
+            "A small number of highly-connected nodes (hubs) control most of the spread",
+            "Centrality-based methods are effective for targeted intervention",
+            "AI-based methods can adapt to specific network patterns for improved results",
+            "Early intervention at peak velocity yields maximum impact",
+            "Monte Carlo simulations provide confidence intervals for risk assessment",
+        ]
+
+        for insight in insights:
+            st.markdown(f"• {insight}")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # ================= PDF EXPORT =================
+        st.markdown("---")
+        st.subheader("📥 Export Report")
+
+        def generate_pdf_report():
+            """Generate a comprehensive PDF report"""
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import letter, A4
+            from reportlab.platypus import (
+                SimpleDocTemplate,
+                Paragraph,
+                Spacer,
+                Table,
+                TableStyle,
+                Image,
+                PageBreak,
+            )
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import inch
+            import io
+            import matplotlib
+
+            matplotlib.use("Agg")
+
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(
+                buffer,
+                pagesize=A4,
+                rightMargin=72,
+                leftMargin=72,
+                topMargin=72,
+                bottomMargin=72,
+            )
+
+            styles = getSampleStyleSheet()
+            # Use unique names to avoid conflicts with built-in styles
+            styles.add(ParagraphStyle(name='CustomTitle', fontSize=24, spaceAfter=30,
+                                    textColor=colors.HexColor('#2c3e50'), fontName='Helvetica-Bold'))
+            styles.add(ParagraphStyle(name='SectionHeader', fontSize=16, spaceAfter=12, spaceBefore=20,
+                                    textColor=colors.HexColor('#667eea'), fontName='Helvetica-Bold'))
+            styles.add(ParagraphStyle(name='SubHeaderCustom', fontSize=12, spaceAfter=6, spaceBefore=10,
+                                    fontName='Helvetica-Bold'))
+            styles.add(ParagraphStyle(name='BodyTextCustom', fontSize=10, spaceAfter=6, leading=14))
+
+            story = []
+
+            # Title
+            story.append(
+                Paragraph("Comprehensive Rumor Analysis Report", styles["CustomTitle"])
+            )
+            story.append(Paragraph(f"Dataset: {meta['name']}", styles["SubHeaderCustom"]))
+            story.append(
+                Paragraph(
+                    f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+                    styles["BodyTextCustom"],
+                )
+            )
+            story.append(Spacer(1, 20))
+
+            # Executive Summary
+            story.append(Paragraph("Executive Summary", styles["SectionHeader"]))
+            for point in summary_points:
+                clean_point = point.replace("**", "")
+                story.append(Paragraph(f"• {clean_point}", styles["BodyTextCustom"]))
+            story.append(Spacer(1, 12))
+
+            # Dataset Details
+            story.append(Paragraph("1. Dataset Details", styles["SectionHeader"]))
+            dataset_data = [
+                ["Property", "Value"],
+                ["Dataset Name", meta["name"]],
+                ["Owner", meta["owner"]],
+                ["Created At", meta["created_at"]],
+            ]
+            t = Table(dataset_data, colWidths=[2 * inch, 4 * inch])
+            t.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#667eea")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("FONTSIZE", (0, 0), (-1, 0), 10),
+                        ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+                        ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#f8f9fa")),
+                        ("GRID", (0, 0), (-1, -1), 1, colors.HexColor("#ddd")),
+                    ]
+                )
+            )
+            story.append(t)
+            story.append(Spacer(1, 12))
+
+            # Network Metrics
+            if vis:
+                story.append(Paragraph("2. Network Topology", styles["SectionHeader"]))
+                network_data = [
+                    ["Metric", "Value"],
+                    ["Total Nodes", str(vis["nodes"])],
+                    ["Total Edges", str(vis["edges"])],
+                    ["Seed Nodes", str(len(vis["seeds"]))],
+                ]
+                if "graph_metrics" in vis:
+                    gm = vis["graph_metrics"]
+                    network_data.extend(
+                        [
+                            ["Density", f"{gm.get('density', 0):.4f}"],
+                            ["Average Degree", f"{gm.get('avg_degree', 0):.2f}"],
+                            [
+                                "Clustering Coefficient",
+                                f"{gm.get('clustering', 0):.4f}",
+                            ],
+                        ]
+                    )
+                t = Table(network_data, colWidths=[2.5 * inch, 3.5 * inch])
+                t.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#667eea")),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+                            (
+                                "BACKGROUND",
+                                (0, 1),
+                                (-1, -1),
+                                colors.HexColor("#f8f9fa"),
+                            ),
+                            ("GRID", (0, 0), (-1, -1), 1, colors.HexColor("#ddd")),
+                        ]
+                    )
+                )
+                story.append(t)
+                story.append(Spacer(1, 12))
+
+            # Simulation Results
+            if sim:
+                story.append(
+                    Paragraph("3. Simulation Results", styles["SectionHeader"])
+                )
+                sim_data = [
+                    ["Parameter", "Value"],
+                    ["Method", sim["method"]],
+                    ["Infection Probability", str(sim["infection_probability"])],
+                    ["Monte Carlo Runs", str(sim["mc_runs"])],
+                    ["Final Infected Count", str(sim["infected_final_count"])],
+                    ["Mean Infection", f"{np.mean(sim['infection_distribution']):.2f}"],
+                    ["Std Deviation", f"{np.std(sim['infection_distribution']):.2f}"],
+                ]
+                t = Table(sim_data, colWidths=[2.5 * inch, 3.5 * inch])
+                t.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e74c3c")),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+                            (
+                                "BACKGROUND",
+                                (0, 1),
+                                (-1, -1),
+                                colors.HexColor("#f8f9fa"),
+                            ),
+                            ("GRID", (0, 0), (-1, -1), 1, colors.HexColor("#ddd")),
+                        ]
+                    )
+                )
+                story.append(t)
+                story.append(Spacer(1, 12))
+
+                # High Risk Nodes
+                story.append(Paragraph("High Risk Nodes", styles["SubHeaderCustom"]))
+                risk_text = ", ".join(map(str, sim["high_risk_nodes"][:10]))
+                story.append(Paragraph(f"Top 10: {risk_text}", styles["BodyTextCustom"]))
+                story.append(Spacer(1, 12))
+
+            # Containment Results
+            if cont:
+                story.append(PageBreak())
+                story.append(
+                    Paragraph(
+                        "4. Containment Strategy Results", styles["SectionHeader"]
+                    )
+                )
+
+                cont_data = [
+                    ["Strategy", "Nodes Blocked", "Baseline", "After", "Reduction"]
+                ]
+                for m, d in cont.items():
+                    if m in ["dataset_id", "saved_at"]:
+                        continue
+                    if isinstance(d, dict):
+                        cont_data.append(
+                            [
+                                m,
+                                str(len(d.get("blocked_nodes", []))),
+                                str(d.get("baseline_infected", "N/A")),
+                                str(d.get("contained_infected", "N/A")),
+                                f"{d.get('reduction_pct', 0):.2f}%",
+                            ]
+                        )
+
+                if len(cont_data) > 1:
+                    t = Table(
+                        cont_data,
+                        colWidths=[1.5 * inch, 1 * inch, 1 * inch, 1 * inch, 1 * inch],
+                    )
+                    t.setStyle(
+                        TableStyle(
+                            [
+                                (
+                                    "BACKGROUND",
+                                    (0, 0),
+                                    (-1, 0),
+                                    colors.HexColor("#27ae60"),
+                                ),
+                                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                                ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+                                (
+                                    "BACKGROUND",
+                                    (0, 1),
+                                    (-1, -1),
+                                    colors.HexColor("#f8f9fa"),
+                                ),
+                                ("GRID", (0, 0), (-1, -1), 1, colors.HexColor("#ddd")),
+                            ]
+                        )
+                    )
+                    story.append(t)
+                    story.append(Spacer(1, 12))
+
+            # AI Containment
+            if ai:
+                story.append(
+                    Paragraph("5. AI-Based Containment", styles["SectionHeader"])
+                )
+                ai_data = [
+                    ["Metric", "Value"],
+                    ["Model Type", ai.get("model_type", "ML-Based")],
+                    ["Baseline Infected", str(ai.get("baseline_infected", "N/A"))],
+                    ["After AI Containment", str(ai.get("contained_infected", "N/A"))],
+                    ["Reduction", f"{ai.get('reduction_pct', 0):.2f}%"],
+                    [
+                        "Blocked Nodes",
+                        ", ".join(map(str, ai.get("blocked_nodes", [])[:5])) + "...",
+                    ],
+                ]
+                t = Table(ai_data, colWidths=[2.5 * inch, 3.5 * inch])
+                t.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#9b59b6")),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
+                            (
+                                "BACKGROUND",
+                                (0, 1),
+                                (-1, -1),
+                                colors.HexColor("#f8f9fa"),
+                            ),
+                            ("GRID", (0, 0), (-1, -1), 1, colors.HexColor("#ddd")),
+                        ]
+                    )
+                )
+                story.append(t)
+                story.append(Spacer(1, 12))
+
+            # Recommendations
+            story.append(Paragraph("6. Recommendations", styles["SectionHeader"]))
+            for rec in recommendations:
+                story.append(
+                    Paragraph(
+                        f"[{rec['priority']}] {rec['category']}", styles["SubHeaderCustom"]
+                    )
+                )
+                story.append(Paragraph(rec["recommendation"], styles["BodyTextCustom"]))
+                story.append(Paragraph(f"Action: {rec['action']}", styles["BodyTextCustom"]))
+                story.append(Spacer(1, 6))
+
+            # Key Insights
+            story.append(Paragraph("7. Key Insights", styles["SectionHeader"]))
+            for insight in insights:
+                story.append(Paragraph(f"• {insight}", styles["BodyTextCustom"]))
+
+            # Build PDF
+            doc.build(story)
+            buffer.seek(0)
+            return buffer
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("📄 Generate PDF Report", key="gen_pdf"):
+                with st.spinner("Generating PDF..."):
+                    try:
+                        pdf_buffer = generate_pdf_report()
+                        st.session_state["pdf_buffer"] = pdf_buffer.getvalue()
+                        st.success("✅ PDF generated successfully!")
+                    except ImportError:
+                        st.error(
+                            "❌ reportlab library not installed. Run: `pip install reportlab`"
+                        )
+                    except Exception as e:
+                        st.error(f"❌ Error generating PDF: {str(e)}")
+
+        with col2:
+            if "pdf_buffer" in st.session_state:
+                st.download_button(
+                    label="⬇️ Download PDF Report",
+                    data=st.session_state["pdf_buffer"],
+                    file_name=f"rumor_analysis_report_{ds_id}_{datetime.utcnow().strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf",
+                )
+
+        # Also offer JSON export
+        st.markdown("---")
+        if st.button("📊 Export Raw Data (JSON)", key="export_json"):
+            export_data = {
+                "metadata": meta,
+                "visualization": vis,
+                "simulation": sim,
+                "containment": cont,
+                "ai_containment": ai,
+                "generated_at": datetime.utcnow().isoformat(),
+            }
+            st.download_button(
+                label="⬇️ Download JSON",
+                data=json.dumps(export_data, indent=2, default=str),
+                file_name=f"rumor_data_{ds_id}.json",
+                mime="application/json",
+            )
+
     except Exception as e:
         show_exception(e, "Report Page")
+
 # End of file
 
 # Ensure session state is initialized
